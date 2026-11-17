@@ -1,13 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
-import { findCycle } from './graph.js';
+import { findCycle } from './graph.ts';
+import { isRecord, type Config, type Health, type Infra, type Service } from './types.ts';
 
-export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'];
+export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'] as const;
 const DEFAULT_HEALTH_TIMEOUT = 180;
 
 /** 현재 폴더부터 상위로 올라가며 설정 파일을 찾는다. */
-export function findConfig(start = process.cwd()) {
+export function findConfig(start: string = process.cwd()): string | null {
   let dir = path.resolve(start);
   for (;;) {
     for (const name of CONFIG_NAMES) {
@@ -21,14 +22,15 @@ export function findConfig(start = process.cwd()) {
 }
 
 /** `set -a; source .env`로 읽히는 단순한 KEY=VALUE 형식을 해석한다. */
-export function parseEnv(text) {
-  const env = {};
+export function parseEnv(text: string): Record<string, string> {
+  const env: Record<string, string> = {};
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith('#')) continue;
     const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*(.*)$/);
     if (!match) continue;
-    let value = match[2];
+    const [, key, rawValue] = match as [string, string, string];
+    let value = rawValue;
     if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
       value = value.slice(1, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"');
     } else if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
@@ -36,39 +38,43 @@ export function parseEnv(text) {
     } else {
       value = value.replace(/\s+#.*$/, '');
     }
-    env[match[1]] = value;
+    env[key] = value;
   }
   return env;
 }
 
-export function readEnvFile(file) {
+export function readEnvFile(file: string | null): Record<string, string> {
   if (!file) return {};
   if (!fs.existsSync(file)) throw new Error(`env 파일을 찾을 수 없습니다: ${file}`);
   return parseEnv(fs.readFileSync(file, 'utf8'));
 }
 
-export function loadConfig(file) {
+export function loadConfig(file: string): Config {
   const root = path.dirname(path.resolve(file));
-  let raw;
+  let raw: unknown;
   try {
     raw = YAML.parse(fs.readFileSync(file, 'utf8')) ?? {};
   } catch (err) {
-    throw new Error(`${path.basename(file)}을 읽을 수 없습니다: ${err.message}`);
+    throw new Error(`${path.basename(file)}을 읽을 수 없습니다: ${(err as Error).message}`);
   }
   const config = normalizeConfig(raw, root);
   config.file = path.resolve(file);
   return config;
 }
 
-export function normalizeConfig(raw, root) {
-  const errors = [];
-  const services = {};
-  const rawServices = raw.services ?? {};
-  if (typeof rawServices !== 'object' || Array.isArray(rawServices)) {
+/** YAML에서 읽은 값을 검증하고 내부 형식으로 바꾼다. 문제는 throw하지 않고 errors에 모은다. */
+export function normalizeConfig(raw: unknown, root: string): Config {
+  const errors: string[] = [];
+  const data = isRecord(raw) ? raw : {};
+  if (raw != null && !isRecord(raw)) errors.push('설정 파일의 최상위는 "키: 값" 형태여야 합니다.');
+
+  const services: Record<string, Service> = {};
+  const rawServices = data.services ?? {};
+  if (!isRecord(rawServices)) {
     errors.push('services는 "이름: 설정" 형태여야 합니다.');
   } else {
     for (const [name, s] of Object.entries(rawServices)) {
-      if (!s || typeof s !== 'object') {
+      if (!isRecord(s)) {
         errors.push(`${name}: 설정이 비어 있습니다.`);
         continue;
       }
@@ -82,7 +88,7 @@ export function normalizeConfig(raw, root) {
         dir: path.resolve(root, String(s.dir ?? '.')),
         cmd: s.cmd == null ? '' : String(s.cmd),
         env: stringifyEnv(s.env),
-        envFile: s.env_file ? path.resolve(root, s.env_file) : null,
+        envFile: s.env_file ? path.resolve(root, String(s.env_file)) : null,
         dependsOn: toList(s.depends_on),
         port,
         health: normalizeHealth(s.health, port, name, errors),
@@ -99,8 +105,8 @@ export function normalizeConfig(raw, root) {
   const cycle = errors.length ? null : findCycle(services);
   if (cycle) errors.push(`순환 의존성이 있습니다: ${cycle.join(' → ')}`);
 
-  const groups = {};
-  for (const [group, list] of Object.entries(raw.groups ?? {})) {
+  const groups: Record<string, string[]> = {};
+  for (const [group, list] of Object.entries(isRecord(data.groups) ? data.groups : {})) {
     if (services[group]) errors.push(`groups.${group}: 서비스 이름과 같은 그룹 이름은 쓸 수 없습니다.`);
     groups[group] = toList(list);
     for (const name of groups[group]) {
@@ -108,30 +114,30 @@ export function normalizeConfig(raw, root) {
     }
   }
 
-  let infra = null;
-  if (raw.infra) {
+  let infra: Infra | null = null;
+  if (isRecord(data.infra)) {
     infra = {
-      composeFiles: toList(raw.infra.compose_files ?? raw.infra.compose_file ?? 'compose.yaml').map((f) =>
+      composeFiles: toList(data.infra.compose_files ?? data.infra.compose_file ?? 'compose.yaml').map((f) =>
         path.resolve(root, f),
       ),
-      services: toList(raw.infra.services),
-      stopOnExit: Boolean(raw.infra.stop_on_exit),
+      services: toList(data.infra.services),
+      stopOnExit: Boolean(data.infra.stop_on_exit),
     };
   }
 
   return {
     root,
-    envFile: raw.env_file ? path.resolve(root, raw.env_file) : null,
-    env: stringifyEnv(raw.env),
+    envFile: data.env_file ? path.resolve(root, String(data.env_file)) : null,
+    env: stringifyEnv(data.env),
     services,
     groups,
     infra,
-    logDir: path.resolve(root, raw.log_dir ?? '.devfleet/logs'),
+    logDir: path.resolve(root, String(data.log_dir ?? '.devfleet/logs')),
     errors,
   };
 }
 
-function normalizeHealth(health, port, name, errors) {
+function normalizeHealth(health: unknown, port: number | null, name: string, errors: string[]): Health {
   const base = { timeout: DEFAULT_HEALTH_TIMEOUT, interval: 1 };
   if (health == null) return port ? { ...base, type: 'tcp', port } : { ...base, type: 'none' };
   if (typeof health === 'string') {
@@ -141,8 +147,11 @@ function normalizeHealth(health, port, name, errors) {
     errors.push(`${name}: health는 http(s) 주소, "tcp", "none" 중 하나여야 합니다.`);
     return { ...base, type: 'none' };
   }
+  if (!isRecord(health)) {
+    errors.push(`${name}: health 형식이 올바르지 않습니다.`);
+    return { ...base, type: 'none' };
+  }
   const merged = {
-    ...base,
     timeout: Number(health.timeout ?? base.timeout),
     interval: Number(health.interval ?? base.interval),
   };
@@ -152,15 +161,16 @@ function normalizeHealth(health, port, name, errors) {
   return { ...merged, type: 'none' };
 }
 
-function toList(value) {
+function toList(value: unknown): string[] {
   if (value == null) return [];
   if (Array.isArray(value)) return value.map(String);
-  if (typeof value === 'object') return Object.keys(value);
+  if (isRecord(value)) return Object.keys(value);
   return [String(value)];
 }
 
-function stringifyEnv(env) {
-  const result = {};
-  for (const [key, value] of Object.entries(env ?? {})) result[key] = value == null ? '' : String(value);
+function stringifyEnv(env: unknown): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!isRecord(env)) return result;
+  for (const [key, value] of Object.entries(env)) result[key] = value == null ? '' : String(value);
   return result;
 }

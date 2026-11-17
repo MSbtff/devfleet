@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import YAML from 'yaml';
-import { detectProject, renderConfig, resolvePlaceholders } from '../src/init.js';
-import { normalizeConfig } from '../src/config.js';
+import { detectProject, renderConfig, resolvePlaceholders } from '../src/init.ts';
+import { normalizeConfig } from '../src/config.ts';
 
-function write(root, rel, text) {
+function write(root: string, rel: string, text: string): void {
   const file = path.join(root, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
@@ -81,7 +81,7 @@ test('생성한 설정은 오류 없이 다시 읽힌다', () => {
   const config = normalizeConfig(YAML.parse(text), root);
   assert.deepEqual(config.errors, []);
   assert.equal(config.services['account-service'].dir, path.join(root, 'AccountService'));
-  assert.deepEqual(config.infra.services, ['mariadb', 'database-init', 'redis']);
+  assert.deepEqual(config.infra?.services, ['mariadb', 'database-init', 'redis']);
   assert.ok(text.indexOf('eureka-server:') < text.indexOf('account-service:'), '의존성 순서로 정렬');
 });
 

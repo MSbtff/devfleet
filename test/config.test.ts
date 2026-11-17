@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeConfig, parseEnv } from '../src/config.js';
-import { resolveTargets, waves } from '../src/graph.js';
+import { normalizeConfig, parseEnv } from '../src/config.ts';
+import { resolveTargets, waves } from '../src/graph.ts';
 
 const raw = {
   services: {

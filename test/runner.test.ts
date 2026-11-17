@@ -7,24 +7,24 @@ import http from 'node:http';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { normalizeConfig } from '../src/config.js';
-import { startFleet } from '../src/runner.js';
-import { isPortOpen } from '../src/ports.js';
+import { normalizeConfig } from '../src/config.ts';
+import { startFleet } from '../src/runner.ts';
+import { isPortOpen } from '../src/ports.ts';
 
-const FAKE = fileURLToPath(new URL('./fixtures/fake-service.js', import.meta.url));
+const FAKE = fileURLToPath(new URL('./fixtures/fake-service.ts', import.meta.url));
 const node = JSON.stringify(process.execPath);
-const fake = (flags) => `${node} ${JSON.stringify(FAKE)} ${flags}`;
+const fake = (flags: string): string => `${node} ${JSON.stringify(FAKE)} ${flags}`;
 
-function freePort() {
+function freePort(): Promise<number> {
   return new Promise((resolve) => {
     const server = net.createServer().listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
+      const { port } = server.address() as net.AddressInfo;
       server.close(() => resolve(port));
     });
   });
 }
 
-function setup(services, extra = {}) {
+function setup(services: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devfleet-'));
   const config = normalizeConfig({ services, ...extra }, root);
   assert.deepEqual(config.errors, []);
@@ -45,7 +45,6 @@ test('의존성 순서대로 띄우고, 준비를 기다리고, 역순으로 종
     { env: { FAKE_VAR: 'global' } },
   );
   fs.writeFileSync(path.join(config.root, '.env.c'), 'FAKE_VAR=from-env-file\n');
-  config.services.c.envFile = path.join(config.root, '.env.c');
 
   const fleet = startFleet(config, [], { out, color: false });
   const rows = await fleet.ready;

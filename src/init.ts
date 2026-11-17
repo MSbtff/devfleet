@@ -2,38 +2,83 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import YAML from 'yaml';
-import { parseEnv } from './config.js';
-import { waves } from './graph.js';
+import { parseEnv } from './config.ts';
+import { waves } from './graph.ts';
+import { isRecord } from './types.ts';
 
 const SKIP_DIRS = new Set(['node_modules', 'build', 'target', 'out', 'bin', 'dist', 'gradle', 'src']);
-const BUILD_FILES = ['build.gradle.kts', 'build.gradle', 'pom.xml'];
-const APP_CONFIGS = ['application.yml', 'application.yaml', 'application.properties'];
-const COMPOSE_FILES = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'];
+const BUILD_FILES = ['build.gradle.kts', 'build.gradle', 'pom.xml'] as const;
+const APP_CONFIGS = ['application.yml', 'application.yaml', 'application.properties'] as const;
+const COMPOSE_FILES = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'] as const;
 const MAX_DEPTH = 3;
 
-/** 프로젝트를 훑어 Spring Boot 앱과 Compose 구성을 찾고 devfleet 설정 초안을 만든다. */
-export function detectProject(root, { useDocker = true } = {}) {
-  root = path.resolve(root);
+type BuildFile = (typeof BUILD_FILES)[number];
+
+interface FoundApp {
+  dir: string;
+  buildFile: BuildFile;
+  buildText: string;
+  appConfig: string;
+}
+
+export interface DetectedApp extends FoundApp {
+  name: string;
+  composeName: string | null;
+  port: number;
+  health: string | null;
+  runDir: string;
+  cmd: string;
+  isEurekaServer: boolean;
+  usesEureka: boolean;
+  dependsOn: string[];
+}
+
+export interface DetectedProject {
+  root: string;
+  envFile: string | null;
+  apps: DetectedApp[];
+  composeFile: string | null;
+  infra: string[];
+}
+
+interface ComposeService {
+  name: string;
+  buildDir: string | null;
+  dependsOn: string[];
+}
+
+interface ComposeProject {
+  file: string;
+  services: Record<string, ComposeService>;
+}
+
+/** 프로젝트를 훑어 Spring Boot 앱과 Compose 구성을 찾는다. */
+export function detectProject(rootDir: string, { useDocker = true }: { useDocker?: boolean } = {}): DetectedProject {
+  const root = path.resolve(rootDir);
   const envFile = fs.existsSync(path.join(root, '.env')) ? '.env' : null;
   const envVars = envFile ? parseEnv(fs.readFileSync(path.join(root, envFile), 'utf8')) : {};
-  const apps = [];
-  walk(root, 0, apps, root);
-  for (const app of apps) Object.assign(app, describeApp(app, root, envVars));
+  const found: FoundApp[] = [];
+  walk(root, 0, found);
+  const apps: DetectedApp[] = found.map((app) => ({
+    ...app,
+    ...describeApp(app, root, envVars),
+    name: '',
+    composeName: null,
+    dependsOn: [],
+  }));
 
   const compose = loadCompose(root, useDocker);
   const byDir = new Map(apps.map((a) => [a.dir, a]));
-  const composeToApp = new Map();
-  if (compose) {
-    for (const svc of Object.values(compose.services)) {
-      const app = svc.buildDir && byDir.get(svc.buildDir);
-      if (app && !app.composeName) {
-        app.composeName = svc.name;
-        composeToApp.set(svc.name, app);
-      }
+  const composeToApp = new Map<string, DetectedApp>();
+  for (const svc of Object.values(compose?.services ?? {})) {
+    const app = svc.buildDir ? byDir.get(svc.buildDir) : undefined;
+    if (app && !app.composeName) {
+      app.composeName = svc.name;
+      composeToApp.set(svc.name, app);
     }
   }
 
-  const usedNames = new Set();
+  const usedNames = new Set<string>();
   for (const app of apps) {
     let name = app.composeName ?? kebab(path.basename(app.dir));
     while (usedNames.has(name)) name += '-2';
@@ -41,21 +86,23 @@ export function detectProject(root, { useDocker = true } = {}) {
     app.name = name;
   }
 
-  const infra = new Set();
-  for (const app of apps) {
-    app.dependsOn = [];
-    if (app.composeName) {
-      const visit = (dep) => {
+  // Compose의 depends_on을 따라가며 앱 간 의존성과 필요한 인프라를 모은다.
+  const infra = new Set<string>();
+  if (compose) {
+    for (const app of apps) {
+      if (!app.composeName) continue;
+      const visit = (dep: string): void => {
         const target = composeToApp.get(dep);
         if (target) {
           if (!app.dependsOn.includes(target.name)) app.dependsOn.push(target.name);
           return;
         }
-        if (infra.has(dep) || !compose.services[dep]) return;
+        const svc = compose.services[dep];
+        if (infra.has(dep) || !svc) return;
         infra.add(dep);
-        compose.services[dep].dependsOn.forEach(visit);
+        svc.dependsOn.forEach(visit);
       };
-      compose.services[app.composeName].dependsOn.forEach(visit);
+      compose.services[app.composeName]?.dependsOn.forEach(visit);
     }
   }
   // Compose에 없으면 Eureka 의존성으로 순서를 추정한다.
@@ -77,8 +124,8 @@ export function detectProject(root, { useDocker = true } = {}) {
   };
 }
 
-function walk(dir, depth, acc, root) {
-  let entries;
+function walk(dir: string, depth: number, acc: FoundApp[]): void {
+  let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
@@ -97,24 +144,27 @@ function walk(dir, depth, acc, root) {
   if (depth >= MAX_DEPTH) return;
   for (const entry of entries) {
     if (entry.isDirectory() && !entry.name.startsWith('.') && !SKIP_DIRS.has(entry.name)) {
-      walk(path.join(dir, entry.name), depth + 1, acc, root);
+      walk(path.join(dir, entry.name), depth + 1, acc);
     }
   }
 }
 
-function describeApp(app, root, envVars) {
+function describeApp(app: FoundApp, root: string, envVars: Record<string, string>) {
   const props = readSpringProps(app.appConfig);
-  const resolve = (key) => (props[key] == null ? null : resolvePlaceholders(String(props[key]), envVars));
+  const resolve = (key: string): string | null =>
+    props[key] == null ? null : resolvePlaceholders(String(props[key]), envVars);
   const port = toPort(resolve('server.port')) ?? 8080;
   const managementPort = toPort(resolve('management.server.port'));
   const basePath = trimSlash(resolve('management.endpoints.web.base-path') ?? '/actuator');
   const contextPath = trimSlash(resolve('server.servlet.context-path') ?? '');
   const hasActuator = /spring-boot-starter-actuator/.test(app.buildText);
-  const health = hasActuator
-    ? managementPort && managementPort !== port
-      ? `http://127.0.0.1:${managementPort}${basePath}/health`
-      : `http://127.0.0.1:${port}${contextPath}${basePath}/health`
-    : null;
+  let health: string | null = null;
+  if (hasActuator) {
+    health =
+      managementPort && managementPort !== port
+        ? `http://127.0.0.1:${managementPort}${basePath}/health`
+        : `http://127.0.0.1:${port}${contextPath}${basePath}/health`;
+  }
   return {
     port,
     health,
@@ -124,7 +174,7 @@ function describeApp(app, root, envVars) {
   };
 }
 
-function runCommand(app, root) {
+function runCommand(app: FoundApp, root: string): { runDir: string; cmd: string } {
   const gradle = app.buildFile !== 'pom.xml';
   const wrapper = gradle ? 'gradlew' : 'mvnw';
   const task = gradle ? 'bootRun' : 'spring-boot:run';
@@ -142,22 +192,22 @@ function runCommand(app, root) {
 }
 
 /** application.yml/properties에서 기본 프로필 값을 평평한 key 맵으로 읽는다. */
-export function readSpringProps(file) {
+export function readSpringProps(file: string): Record<string, unknown> {
   const text = fs.readFileSync(file, 'utf8');
-  const result = {};
+  const result: Record<string, unknown> = {};
   if (file.endsWith('.properties')) {
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trim();
       if (!line || line.startsWith('#') || line.startsWith('!')) continue;
       const match = line.match(/^([^=:\s]+)\s*[=:]\s*(.*)$/);
-      if (match) result[match[1]] = match[2];
+      if (match) result[match[1]!] = match[2];
     }
     return result;
   }
   for (const doc of YAML.parseAllDocuments(text)) {
-    const value = doc.toJS();
-    if (!value || typeof value !== 'object') continue;
-    const flat = {};
+    const value: unknown = doc.toJS();
+    if (!isRecord(value)) continue;
+    const flat: Record<string, unknown> = {};
     flatten(value, '', flat);
     if (flat['spring.config.activate.on-profile'] || flat['spring.profiles']) continue;
     Object.assign(result, flat);
@@ -165,23 +215,26 @@ export function readSpringProps(file) {
   return result;
 }
 
-function flatten(value, prefix, out) {
+function flatten(value: Record<string, unknown>, prefix: string, out: Record<string, unknown>): void {
   for (const [key, child] of Object.entries(value)) {
     const full = prefix ? `${prefix}.${key}` : key;
-    if (child && typeof child === 'object' && !Array.isArray(child)) flatten(child, full, out);
+    if (isRecord(child)) flatten(child, full, out);
     else out[full] = child;
   }
 }
 
 /** ${NAME:default} 형식을 .env 값 또는 기본값으로 바꾼다. */
-export function resolvePlaceholders(text, env) {
-  return text.replace(/\$\{([^:}]+)(?::([^}]*))?\}/g, (_, key, fallback) => env[key] ?? fallback ?? '');
+export function resolvePlaceholders(text: string, env: Record<string, string>): string {
+  return text.replace(
+    /\$\{([^:}]+)(?::([^}]*))?\}/g,
+    (_, key: string, fallback: string | undefined) => env[key] ?? fallback ?? '',
+  );
 }
 
-function loadCompose(root, useDocker) {
+function loadCompose(root: string, useDocker: boolean): ComposeProject | null {
   const file = COMPOSE_FILES.find((f) => fs.existsSync(path.join(root, f)));
   if (!file) return null;
-  let doc = null;
+  let doc: unknown = null;
   if (useDocker) {
     // docker compose config는 데몬 없이도 동작하며 extends/include/환경변수를 모두 반영해 준다.
     const res = spawnSync('docker', ['compose', '-f', file, 'config', '--format', 'json'], {
@@ -204,27 +257,32 @@ function loadCompose(root, useDocker) {
       return null;
     }
   }
-  const services = {};
-  for (const [name, s] of Object.entries(doc?.services ?? {})) {
-    let buildDir = null;
+  const services: Record<string, ComposeService> = {};
+  const rawServices = isRecord(doc) && isRecord(doc.services) ? doc.services : {};
+  for (const [name, s] of Object.entries(rawServices)) {
+    if (!isRecord(s)) continue;
+    let buildDir: string | null = null;
     if (s.build) {
-      const build = typeof s.build === 'string' ? { context: s.build } : s.build;
-      const context = path.resolve(root, build.context ?? '.');
-      buildDir = build.dockerfile ? path.dirname(path.resolve(context, build.dockerfile)) : context;
+      const build = isRecord(s.build) ? s.build : { context: s.build };
+      const context = path.resolve(root, String(build.context ?? '.'));
+      buildDir = build.dockerfile ? path.dirname(path.resolve(context, String(build.dockerfile))) : context;
     }
-    const dependsOn = Array.isArray(s.depends_on) ? s.depends_on : Object.keys(s.depends_on ?? {});
+    const dependsOn = Array.isArray(s.depends_on)
+      ? s.depends_on.map(String)
+      : Object.keys(isRecord(s.depends_on) ? s.depends_on : {});
     services[name] = { name, buildDir, dependsOn };
   }
   return { file, services };
 }
 
-export function renderConfig(project) {
+/** 감지 결과를 주석이 달린 devfleet.yaml 텍스트로 만든다. */
+export function renderConfig(project: DetectedProject): string {
   const lines = [
     '# devfleet 설정 파일 — `devfleet init`이 만든 초안입니다. 필요에 맞게 고쳐 쓰세요.',
     '# 실행: devfleet up [서비스 또는 그룹 ...]',
     '',
   ];
-  if (project.envFile) lines.push(`# 모든 서비스에 넣을 환경변수 파일`, `env_file: ${scalar(project.envFile)}`, '');
+  if (project.envFile) lines.push('# 모든 서비스에 넣을 환경변수 파일', `env_file: ${scalar(project.envFile)}`, '');
   if (project.composeFile && project.infra.length) {
     lines.push(
       '# 앱보다 먼저 Docker Compose로 띄울 인프라 (DB, 캐시, 메시지 브로커 등)',
@@ -236,10 +294,10 @@ export function renderConfig(project) {
     );
   }
   lines.push('services:');
-  const services = Object.fromEntries(project.apps.map((a) => [a.name, a]));
-  const ordered = waves(services, project.apps.map((a) => a.name)).flat();
+  const byName = Object.fromEntries(project.apps.map((a) => [a.name, a]));
+  const ordered = waves(byName, project.apps.map((a) => a.name)).flat();
   for (const name of ordered) {
-    const app = services[name];
+    const app = byName[name]!;
     lines.push(`  ${scalar(name)}:`);
     lines.push(`    dir: ${scalar(path.relative(project.root, app.runDir) || '.')}`);
     lines.push(`    cmd: ${scalar(app.cmd)}`);
@@ -257,12 +315,13 @@ export function renderConfig(project) {
   return `${lines.join('\n')}\n`;
 }
 
-function scalar(value) {
-  const text = String(value);
-  return /^[A-Za-z0-9_./][A-Za-z0-9_./ :=-]*$/.test(text) && !/: |\s#|:$|\s$/.test(text) ? text : JSON.stringify(text);
+function scalar(value: string): string {
+  return /^[A-Za-z0-9_./][A-Za-z0-9_./ :=-]*$/.test(value) && !/: |\s#|:$|\s$/.test(value)
+    ? value
+    : JSON.stringify(value);
 }
 
-function kebab(name) {
+function kebab(name: string): string {
   return name
     .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
     .replace(/[^A-Za-z0-9]+/g, '-')
@@ -270,12 +329,12 @@ function kebab(name) {
     .toLowerCase();
 }
 
-function toPort(value) {
+function toPort(value: string | null): number | null {
   const n = Number(value);
   return Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
 }
 
-function trimSlash(value) {
+function trimSlash(value: string): string {
   if (!value || value === '/') return '';
   return `/${value.replace(/^\/+|\/+$/g, '')}`;
 }

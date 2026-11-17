@@ -1,0 +1,21 @@
+{
+  // 타입 검사용 (src + test). 실제 빌드는 tsconfig.build.json
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    // Node가 .ts를 직접 실행(type stripping)할 수 있도록 지울 수 있는 문법만 사용
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    // 소스는 './config.ts'로 import하고, 빌드 시 './config.js'로 바꾼다
+    "rewriteRelativeImportExtensions": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "test"]
+}
