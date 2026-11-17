@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import YAML from 'yaml';
 import { parseEnv } from './config.ts';
 import { waves } from './graph.ts';
+import { RULES, type AppFacts, type DetectorRule } from './detectors.ts';
 import { isRecord } from './types.ts';
 
 const SKIP_DIRS = new Set(['node_modules', 'build', 'target', 'out', 'bin', 'dist', 'gradle', 'src']);
@@ -28,8 +29,9 @@ export interface DetectedApp extends FoundApp {
   health: string | null;
   runDir: string;
   cmd: string;
-  isEurekaServer: boolean;
-  usesEureka: boolean;
+  facts: AppFacts;
+  /** 이 앱이 맡은 서버 역할 (예: Spring Cloud Config) */
+  roles: string[];
   dependsOn: string[];
 }
 
@@ -39,11 +41,14 @@ export interface DetectedProject {
   apps: DetectedApp[];
   composeFile: string | null;
   infra: string[];
+  /** 사용자가 직접 확인해야 할 점 */
+  warnings: string[];
 }
 
 interface ComposeService {
   name: string;
   buildDir: string | null;
+  image: string | null;
   dependsOn: string[];
 }
 
@@ -64,6 +69,7 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
     ...describeApp(app, root, envVars),
     name: '',
     composeName: null,
+    roles: [],
     dependsOn: [],
   }));
 
@@ -88,31 +94,44 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
 
   // Compose의 depends_on을 따라가며 앱 간 의존성과 필요한 인프라를 모은다.
   const infra = new Set<string>();
+  const addInfra = (name: string): void => {
+    const svc = compose?.services[name];
+    if (!svc || infra.has(name) || composeToApp.has(name)) return;
+    infra.add(name);
+    svc.dependsOn.forEach(addInfra);
+  };
   if (compose) {
     for (const app of apps) {
       if (!app.composeName) continue;
-      const visit = (dep: string): void => {
+      for (const dep of compose.services[app.composeName]?.dependsOn ?? []) {
         const target = composeToApp.get(dep);
-        if (target) {
-          if (!app.dependsOn.includes(target.name)) app.dependsOn.push(target.name);
-          return;
-        }
-        const svc = compose.services[dep];
-        if (infra.has(dep) || !svc) return;
-        infra.add(dep);
-        svc.dependsOn.forEach(visit);
-      };
-      compose.services[app.composeName]?.dependsOn.forEach(visit);
-    }
-  }
-  // Compose에 없으면 Eureka 의존성으로 순서를 추정한다.
-  const eurekaServer = apps.find((a) => a.isEurekaServer);
-  if (eurekaServer) {
-    for (const app of apps) {
-      if (!app.composeName && app !== eurekaServer && app.usesEureka && !app.dependsOn.includes(eurekaServer.name)) {
-        app.dependsOn.push(eurekaServer.name);
+        if (target) addDependency(apps, app, target);
+        else addInfra(dep);
       }
     }
+  }
+
+  // Spring Cloud 서버(Config, Eureka, Consul, Nacos 등)를 쓰는 앱은 서버 뒤에 시작한다.
+  // compose의 depends_on에 빠져 있는 경우도 많아서 compose 앱에도 적용한다.
+  const warnings: string[] = [];
+  for (const rule of RULES) {
+    const users = apps.filter((a) => rule.uses(a.facts));
+    if (!users.length) continue;
+    const server = rule.serves ? apps.find((a) => rule.serves!(a.facts)) : undefined;
+    if (server) {
+      server.roles.push(rule.label);
+      for (const app of users) if (app !== server) addDependency(apps, app, server);
+      continue;
+    }
+    const infraService = compose && findInfraService(rule, compose, composeToApp);
+    if (infraService) {
+      addInfra(infraService);
+      continue;
+    }
+    warnings.push(
+      `${rule.label}을(를) 쓰는 앱(${users.map((a) => a.name).join(', ')})이 있지만 ` +
+        `${rule.label} 서버를 찾지 못했습니다. 직접 띄우거나 compose.yaml에 추가해 infra로 지정하세요.`,
+    );
   }
 
   return {
@@ -121,7 +140,40 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
     apps,
     composeFile: compose?.file ?? null,
     infra: compose ? Object.keys(compose.services).filter((n) => infra.has(n)) : [],
+    warnings,
   };
+}
+
+/** app이 target 뒤에 시작하도록 의존성을 추가한다. 순환이 생기면 추가하지 않는다. */
+function addDependency(apps: readonly DetectedApp[], app: DetectedApp, target: DetectedApp): boolean {
+  if (app === target || app.dependsOn.includes(target.name)) return false;
+  const byName = new Map(apps.map((a) => [a.name, a]));
+  const seen = new Set<string>();
+  const reaches = (from: DetectedApp): boolean => {
+    if (from === app) return true;
+    if (seen.has(from.name)) return false;
+    seen.add(from.name);
+    return from.dependsOn.some((dep) => {
+      const next = byName.get(dep);
+      return next ? reaches(next) : false;
+    });
+  };
+  if (reaches(target)) return false;
+  app.dependsOn.push(target.name);
+  return true;
+}
+
+function findInfraService(
+  rule: DetectorRule,
+  compose: ComposeProject,
+  composeToApp: ReadonlyMap<string, DetectedApp>,
+): string | null {
+  if (!rule.infraImage) return null;
+  const pattern = rule.infraImage;
+  const svc = Object.values(compose.services).find(
+    (s) => !composeToApp.has(s.name) && (pattern.test(s.name) || (s.image != null && pattern.test(s.image))),
+  );
+  return svc?.name ?? null;
 }
 
 function walk(dir: string, depth: number, acc: FoundApp[]): void {
@@ -169,8 +221,7 @@ function describeApp(app: FoundApp, root: string, envVars: Record<string, string
     port,
     health,
     ...runCommand(app, root),
-    isEurekaServer: /eureka-server/.test(app.buildText),
-    usesEureka: /eureka-client|spring-cloud-starter-gateway/.test(app.buildText),
+    facts: { buildText: app.buildText, props },
   };
 }
 
@@ -270,7 +321,7 @@ function loadCompose(root: string, useDocker: boolean): ComposeProject | null {
     const dependsOn = Array.isArray(s.depends_on)
       ? s.depends_on.map(String)
       : Object.keys(isRecord(s.depends_on) ? s.depends_on : {});
-    services[name] = { name, buildDir, dependsOn };
+    services[name] = { name, buildDir, image: typeof s.image === 'string' ? s.image : null, dependsOn };
   }
   return { file, services };
 }
@@ -282,6 +333,9 @@ export function renderConfig(project: DetectedProject): string {
     '# 실행: devfleet up [서비스 또는 그룹 ...]',
     '',
   ];
+  if (project.warnings.length) {
+    lines.push('# 확인 필요:', ...project.warnings.map((w) => `#   - ${w}`), '');
+  }
   if (project.envFile) lines.push('# 모든 서비스에 넣을 환경변수 파일', `env_file: ${scalar(project.envFile)}`, '');
   if (project.composeFile && project.infra.length) {
     lines.push(
@@ -298,6 +352,7 @@ export function renderConfig(project: DetectedProject): string {
   const ordered = waves(byName, project.apps.map((a) => a.name)).flat();
   for (const name of ordered) {
     const app = byName[name]!;
+    if (app.roles.length) lines.push(`  # ${app.roles.join(', ')} 서버`);
     lines.push(`  ${scalar(name)}:`);
     lines.push(`    dir: ${scalar(path.relative(project.root, app.runDir) || '.')}`);
     lines.push(`    cmd: ${scalar(app.cmd)}`);

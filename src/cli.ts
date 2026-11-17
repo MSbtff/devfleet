@@ -104,7 +104,11 @@ function cmdInit(opts: Args): void {
   fs.writeFileSync(target, text);
   console.log(`${CONFIG_NAMES[0]}을 만들었습니다.`);
   console.log(`  Spring Boot 앱 ${project.apps.length}개: ${project.apps.map((a) => a.name).join(', ') || '없음'}`);
+  for (const app of project.apps.filter((a) => a.roles.length)) {
+    console.log(`  ${app.roles.join(', ')} 서버: ${app.name} (이 서버를 쓰는 앱은 그 뒤에 시작)`);
+  }
   if (project.infra.length) console.log(`  인프라 (${project.composeFile}): ${project.infra.join(', ')}`);
+  for (const warning of project.warnings) console.log(`  ! ${warning}`);
   console.log('내용을 확인한 뒤 `devfleet up`으로 실행하세요. 로그는 .devfleet/logs에 쌓이니 .gitignore에 추가하세요.');
 }
 

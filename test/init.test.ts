@@ -90,3 +90,68 @@ test('Spring 플레이스홀더를 해석한다', () => {
   assert.equal(resolvePlaceholders('${A:1}', { A: '2' }), '2');
   assert.equal(resolvePlaceholders('http://${HOST:localhost}:${PORT}', { PORT: '9' }), 'http://localhost:9');
 });
+
+test('Config Server를 Eureka보다 먼저 띄우고, 서로 쓰는 경우의 순환은 만들지 않는다', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devfleet-cloud-'));
+  const CONFIG_CLIENT = "implementation 'org.springframework.cloud:spring-cloud-starter-config'\n";
+  const EUREKA_CLIENT = "implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'\n";
+  // Config Server는 Eureka에 등록하고, Eureka는 설정을 Config Server에서 받는다.
+  write(root, 'config/build.gradle', BOOT + ACTUATOR + "implementation 'spring-cloud-config-server'\n" + EUREKA_CLIENT);
+  write(root, 'config/src/main/resources/application.yml', 'server:\n  port: 8888\n');
+  write(root, 'registry/build.gradle', BOOT + "implementation 'spring-cloud-starter-netflix-eureka-server'\n");
+  write(
+    root,
+    'registry/src/main/resources/application.yml',
+    'server:\n  port: 8761\nspring:\n  config:\n    import: "optional:configserver:http://localhost:8888"\n',
+  );
+  write(root, 'order/build.gradle', BOOT + CONFIG_CLIENT + EUREKA_CLIENT);
+  write(root, 'order/src/main/resources/application.yml', 'server:\n  port: 8081\n');
+  // Eureka 클라이언트 의존성은 있지만 설정으로 끈 앱
+  write(root, 'legacy/build.gradle', BOOT + EUREKA_CLIENT);
+  write(root, 'legacy/src/main/resources/application.yml', 'server:\n  port: 8082\neureka:\n  client:\n    enabled: false\n');
+
+  const project = detectProject(root, { useDocker: false });
+  const apps = Object.fromEntries(project.apps.map((a) => [a.name, a]));
+  assert.deepEqual(apps.config?.dependsOn, [], 'Eureka → Config 의존이 이미 있으므로 Config → Eureka는 추가하지 않는다');
+  assert.deepEqual(apps.registry?.dependsOn, ['config']);
+  assert.deepEqual(apps.order?.dependsOn, ['config', 'registry']);
+  assert.deepEqual(apps.legacy?.dependsOn, []);
+  assert.deepEqual(apps.config?.roles, ['Spring Cloud Config']);
+  assert.deepEqual(apps.registry?.roles, ['Eureka']);
+  assert.deepEqual(project.warnings, []);
+
+  const text = renderConfig(project);
+  assert.match(text, /# Spring Cloud Config 서버\n {2}config:/);
+  const config = normalizeConfig(YAML.parse(text), root);
+  assert.deepEqual(config.errors, []);
+  assert.ok(text.indexOf('  config:') < text.indexOf('  registry:'));
+  assert.ok(text.indexOf('  registry:') < text.indexOf('  order:'));
+});
+
+test('Consul은 compose 서비스를 infra로 넣고, 서버를 못 찾은 Nacos는 경고한다', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devfleet-infra-'));
+  write(root, 'payment/build.gradle', BOOT + "implementation 'org.springframework.cloud:spring-cloud-starter-consul-discovery'\n");
+  write(root, 'payment/src/main/resources/application.yml', 'server:\n  port: 8090\n');
+  write(root, 'stock/build.gradle', BOOT + "implementation 'com.alibaba.cloud:spring-cloud-starter-alibaba-nacos-discovery'\n");
+  write(root, 'stock/src/main/resources/application.yml', 'server:\n  port: 8091\n');
+  write(
+    root,
+    'compose.yaml',
+    `services:
+  consul: { image: hashicorp/consul:1.19 }
+  redis: { image: redis:8 }
+  grafana: { image: grafana/grafana }
+  payment:
+    build: { context: ., dockerfile: payment/Dockerfile }
+    depends_on: [redis]
+`,
+  );
+
+  const project = detectProject(root, { useDocker: false });
+  assert.deepEqual(project.infra, ['consul', 'redis']);
+  assert.equal(project.warnings.length, 1);
+  assert.match(project.warnings[0] ?? '', /Nacos.*stock/);
+  const text = renderConfig(project);
+  assert.match(text, /# 확인 필요:\n# {3}- Nacos/);
+  assert.deepEqual(normalizeConfig(YAML.parse(text), root).errors, []);
+});
