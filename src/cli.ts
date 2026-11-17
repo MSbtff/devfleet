@@ -3,13 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { findConfig, loadConfig, CONFIG_NAMES } from '../src/config.js';
-import { startFleet, planUp, formatSummary, infraArgs } from '../src/runner.js';
-import { detectProject, renderConfig } from '../src/init.js';
-import { isPortOpen, findListeners, describeListeners } from '../src/ports.js';
-import { checkOnce, describeHealth } from '../src/health.js';
+import { findConfig, loadConfig, CONFIG_NAMES } from './config.ts';
+import { startFleet, planUp, formatSummary, formatTable, infraArgs, type Plan } from './runner.ts';
+import { detectProject, renderConfig } from './init.ts';
+import { isPortOpen, findListeners, describeListeners } from './ports.ts';
+import { checkOnce, describeHealth } from './health.ts';
+import type { Config } from './types.ts';
 
-const { version } = createRequire(import.meta.url)('../package.json');
+// src/cli.ts와 dist/cli.js 모두 한 단계 위에 package.json이 있다.
+const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 const HELP = `devfleet ${version} — 로컬 MSA 서비스를 한 번에 띄우는 CLI
 
@@ -33,12 +35,18 @@ up 옵션
   -h, --help / -v, --version
 `;
 
-function parseArgs(argv) {
-  const opts = { _: [] };
-  const valueFlags = new Set(['config', 'only', 'n']);
-  const alias = { c: 'config', q: 'quiet', f: 'follow', h: 'help', v: 'version' };
+interface Args {
+  _: string[];
+  [flag: string]: string | boolean | string[] | undefined;
+}
+
+const VALUE_FLAGS = new Set(['config', 'only', 'n']);
+const ALIASES: Record<string, string> = { c: 'config', q: 'quiet', f: 'follow', h: 'help', v: 'version' };
+
+export function parseArgs(argv: readonly string[]): Args {
+  const opts: Args = { _: [] };
   for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
+    const arg = argv[i]!;
     if (arg === '--') {
       opts._.push(...argv.slice(i + 1));
       break;
@@ -49,30 +57,32 @@ function parseArgs(argv) {
       opts._.push(arg);
       continue;
     }
-    let key = long ? long[1] : (alias[short[1]] ?? short[1]);
-    let value = long?.[2];
+    const key = long ? long[1]! : (ALIASES[short![1]!] ?? short![1]!);
     if (key.startsWith('no-')) {
       opts[key.slice(3)] = false;
       continue;
     }
-    if (valueFlags.has(key)) {
-      value ??= argv[++i];
+    if (VALUE_FLAGS.has(key)) {
+      const value = long?.[2] ?? argv[++i];
       if (value == null) fail(`--${key}에 값이 필요합니다.`);
       opts[key] = value;
     } else {
-      opts[key] = value ?? true;
+      opts[key] = long?.[2] ?? true;
     }
   }
   return opts;
 }
 
-function fail(message) {
+function fail(message: string): never {
   process.stderr.write(`devfleet: ${message}\n`);
   process.exit(1);
 }
 
-function requireConfig(opts) {
-  const file = opts.config ? path.resolve(opts.config) : findConfig();
+const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+
+function requireConfig(opts: Args): Config {
+  const configPath = str(opts.config);
+  const file = configPath ? path.resolve(configPath) : findConfig();
   if (!file || !fs.existsSync(file)) {
     fail(`${CONFIG_NAMES[0]}을 찾지 못했습니다. 프로젝트 루트에서 \`devfleet init\`을 먼저 실행하세요.`);
   }
@@ -81,7 +91,7 @@ function requireConfig(opts) {
   return config;
 }
 
-async function cmdInit(opts) {
+function cmdInit(opts: Args): void {
   const root = process.cwd();
   const target = path.join(root, CONFIG_NAMES[0]);
   const project = detectProject(root);
@@ -98,16 +108,17 @@ async function cmdInit(opts) {
   console.log('내용을 확인한 뒤 `devfleet up`으로 실행하세요. 로그는 .devfleet/logs에 쌓이니 .gitignore에 추가하세요.');
 }
 
-function printPlan(config, plan, opts) {
-  const rel = (p) => path.relative(config.root, p) || '.';
+function printPlan(config: Config, plan: Plan, opts: Args): void {
+  const rel = (p: string) => path.relative(config.root, p) || '.';
   if (opts.infra !== false && config.infra?.services.length) {
-    console.log(`infra: docker ${infraArgs(config, 'up', ['-d', '--wait']).map((a) => (path.isAbsolute(a) ? rel(a) : a)).join(' ')}`);
+    const args = infraArgs(config.infra, 'up', ['-d', '--wait']).map((a) => (path.isAbsolute(a) ? rel(a) : a));
+    console.log(`infra: docker ${args.join(' ')}`);
   }
   if (plan.external.length) console.log(`이미 실행 중이어야 함: ${plan.external.join(', ')}`);
   plan.waves.forEach((wave, i) => {
     console.log(`${i + 1}단계 (동시 시작)`);
     for (const name of wave) {
-      const svc = config.services[name];
+      const svc = config.services[name]!;
       const deps = svc.dependsOn.length ? ` ← ${svc.dependsOn.join(', ')}` : '';
       console.log(`  ${name}${deps}`);
       console.log(`    ${svc.cmd}  @ ${rel(svc.dir)}`);
@@ -116,35 +127,34 @@ function printPlan(config, plan, opts) {
   });
 }
 
-async function cmdUp(opts) {
+async function cmdUp(opts: Args): Promise<void> {
   const config = requireConfig(opts);
+  const only = str(opts.only);
   const runOpts = {
     deps: opts.deps !== false,
     infra: opts.infra !== false,
     stopInfra: Boolean(opts.down),
     quiet: Boolean(opts.quiet),
-    only: opts.only ? String(opts.only).split(',').map((s) => s.trim()).filter(Boolean) : null,
+    only: only ? only.split(',').map((s) => s.trim()).filter(Boolean) : null,
   };
   if (opts['dry-run']) {
-    let plan;
     try {
-      plan = planUp(config, opts._, runOpts);
+      printPlan(config, planUp(config, opts._, runOpts), opts);
     } catch (err) {
-      fail(err.message);
+      fail((err as Error).message);
     }
-    printPlan(config, plan, opts);
     return;
   }
 
-  let fleet;
+  let fleet: ReturnType<typeof startFleet>;
   try {
     fleet = startFleet(config, opts._, runOpts);
   } catch (err) {
-    fail(err.message);
+    fail((err as Error).message);
   }
   const { logger } = fleet;
   let signals = 0;
-  const shutdown = async (code) => {
+  const shutdown = async (code: number) => {
     await fleet.stop();
     process.exit(code);
   };
@@ -152,9 +162,9 @@ async function cmdUp(opts) {
     signals += 1;
     if (signals === 1) {
       logger.system('종료합니다… (한 번 더 Ctrl+C: 강제 종료)');
-      shutdown(130);
+      void shutdown(130);
     } else {
-      fleet.stop({ force: true }).then(() => process.exit(130));
+      void fleet.stop({ force: true }).then(() => process.exit(130));
     }
   };
   process.on('SIGINT', onSignal);
@@ -165,7 +175,7 @@ async function cmdUp(opts) {
   logger.system('');
   for (const line of formatSummary(rows).split('\n')) logger.system(line);
   const running = rows.filter((r) => r.pid);
-  const failed = rows.filter((r) => ['failed', 'skipped'].includes(r.status));
+  const failed = rows.filter((r) => r.status === 'failed' || r.status === 'skipped');
   logger.system('');
   if (!running.length) {
     logger.system(failed.length ? '실행 중인 서비스가 없어 종료합니다.' : '새로 띄운 서비스가 없습니다.');
@@ -176,49 +186,54 @@ async function cmdUp(opts) {
   await fleet.allExited;
   if (signals) return;
   logger.system('직접 띄운 서비스가 모두 종료됐습니다.');
-  shutdown(1);
+  return shutdown(1);
 }
 
-async function cmdStatus(opts) {
+async function cmdStatus(opts: Args): Promise<void> {
   const config = requireConfig(opts);
   const rows = await Promise.all(
-    Object.values(config.services).map(async (svc) => {
+    Object.values(config.services).map(async (svc): Promise<string[]> => {
       if (!svc.port) {
         const ok = svc.health.type !== 'none' && (await checkOnce(svc.health));
         return [svc.name, '', ok ? '● 정상' : '? 포트 없음', ''];
       }
-      if (!(await isPortOpen(svc.port))) return [svc.name, svc.port, '○ 중지', ''];
+      const port = String(svc.port);
+      if (!(await isPortOpen(svc.port))) return [svc.name, port, '○ 중지', ''];
       const who = describeListeners(await findListeners(svc.port));
       const healthy = await checkOnce(svc.health);
-      return [svc.name, svc.port, healthy ? '● 정상' : '◐ 포트 열림, 헬스 실패', who];
+      return [svc.name, port, healthy ? '● 정상' : '◐ 포트 열림, 헬스 실패', who];
     }),
   );
-  const header = ['서비스', '포트', '상태', '프로세스'];
-  const width = (s) => [...String(s)].reduce((w, ch) => w + (/[가-힣]/.test(ch) ? 2 : 1), 0);
-  const widths = header.map((h, i) => Math.max(width(h), ...rows.map((r) => width(r[i]))));
-  for (const row of [header, ...rows]) {
-    console.log(row.map((c, i) => String(c) + ' '.repeat(widths[i] - width(c))).join('  ').trimEnd());
-  }
+  console.log(formatTable([['서비스', '포트', '상태', '프로세스'], ...rows]));
 }
 
-function cmdLogs(opts) {
+function cmdLogs(opts: Args): void {
   const config = requireConfig(opts);
   const name = opts._[0];
   if (!name) fail('서비스 이름을 지정하세요. 예: devfleet logs account-service -f');
   if (!config.services[name] && name !== 'infra') fail(`알 수 없는 서비스: ${name}`);
   const file = path.join(config.logDir, `${name}.log`);
   if (!fs.existsSync(file)) fail(`아직 로그가 없습니다: ${path.relative(process.cwd(), file)}`);
-  const args = ['-n', String(opts.n ?? 100), ...(opts.follow ? ['-f'] : []), file];
+  const args = ['-n', str(opts.n) ?? '100', ...(opts.follow ? ['-f'] : []), file];
   spawn('tail', args, { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 0));
 }
 
-function cmdDown(opts) {
+function cmdDown(opts: Args): void {
   const config = requireConfig(opts);
   if (!config.infra?.services.length) fail('설정에 infra가 없습니다.');
-  spawn('docker', infraArgs(config, 'stop'), { cwd: config.root, stdio: 'inherit' }).on('exit', (code) =>
+  spawn('docker', infraArgs(config.infra, 'stop'), { cwd: config.root, stdio: 'inherit' }).on('exit', (code) =>
     process.exit(code ?? 1),
   );
 }
+
+const COMMANDS: Record<string, (opts: Args) => void | Promise<void>> = {
+  init: cmdInit,
+  up: cmdUp,
+  status: cmdStatus,
+  ps: cmdStatus,
+  logs: cmdLogs,
+  down: cmdDown,
+};
 
 const opts = parseArgs(process.argv.slice(2));
 const command = opts._.shift();
@@ -227,7 +242,7 @@ if (opts.version) {
 } else if (opts.help || !command || command === 'help') {
   process.stdout.write(HELP);
 } else {
-  const commands = { init: cmdInit, up: cmdUp, status: cmdStatus, ps: cmdStatus, logs: cmdLogs, down: cmdDown };
-  if (!commands[command]) fail(`알 수 없는 명령: ${command}\n\n${HELP}`);
-  Promise.resolve(commands[command](opts)).catch((err) => fail(err.stack ?? err.message));
+  const run = COMMANDS[command];
+  if (!run) fail(`알 수 없는 명령: ${command}\n\n${HELP}`);
+  Promise.resolve(run(opts)).catch((err: Error) => fail(err.stack ?? err.message));
 }

@@ -47,8 +47,8 @@ devfleet      │ account-service    ✔ 준비  7071  12.4s  33190
 Node.js 20 이상이 필요합니다.
 
 ```bash
-git clone <이 저장소> && cd devfleet
-npm install
+git clone https://github.com/MSbtff/devfleet.git && cd devfleet
+npm install         # 설치하면서 TypeScript를 dist/로 빌드합니다
 npm link            # 어디서나 devfleet 명령 사용
 ```
 
@@ -125,14 +125,29 @@ Spring 없이 바로 동작을 확인할 수 있습니다.
 
 ```bash
 cd examples/demo
-node ../../bin/devfleet.js up
+node ../../dist/cli.js up
 ```
 
 ## 개발
 
+TypeScript로 작성했습니다. 테스트와 예제의 가짜 서비스는 Node의 TypeScript 실행 기능(type stripping)으로
+빌드 없이 바로 돌아가므로 개발할 때는 **Node.js 22.18 이상**이 필요합니다.
+
 ```bash
-npm test
+npm run typecheck   # 타입 검사 (src + test)
+npm test            # node --test로 .ts 테스트 실행
+npm run build       # dist/ 생성
 ```
+
+| 파일 | 역할 |
+|---|---|
+| `src/cli.ts` | 명령 파싱과 출력 |
+| `src/config.ts` | `devfleet.yaml`·`.env` 읽기와 검증 |
+| `src/graph.ts` | 대상 서비스 계산, 순환 검사, 실행 단계 나누기 |
+| `src/runner.ts` | 프로세스 실행·헬스 대기·종료 정리 |
+| `src/init.ts` | Spring Boot·Compose 프로젝트 분석 |
+| `src/health.ts`, `src/ports.ts` | 헬스체크, 포트 점유 확인 |
+| `src/logger.ts` | 색상 접두어 로그와 로그 파일 |
 
 ## 로드맵
 
