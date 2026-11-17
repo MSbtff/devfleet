@@ -1,0 +1,31 @@
+{
+  "name": "devfleet",
+  "version": "0.1.0",
+  "description": "로컬에서 여러 마이크로서비스를 의존성 순서대로 띄우고, 헬스체크를 기다리고, 로그를 한 화면에 모아 보는 CLI",
+  "type": "module",
+  "bin": {
+    "devfleet": "bin/devfleet.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "microservices",
+    "msa",
+    "spring-boot",
+    "local-development",
+    "process-manager",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "yaml": "^2.9.1"
+  }
+}

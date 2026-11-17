@@ -1,0 +1,28 @@
+# Spring 없이 devfleet 동작을 바로 확인해 보는 예제입니다.
+#   cd examples/demo && npx devfleet up
+env:
+  FAKE_VAR: demo
+
+services:
+  registry:
+    cmd: node ../../test/fixtures/fake-service.js --port=18761 --delay=800
+    port: 18761
+
+  account:
+    cmd: node ../../test/fixtures/fake-service.js --port=17071 --delay=1200
+    port: 17071
+    depends_on: [registry]
+    health: http://127.0.0.1:17071/actuator/health
+
+  menus:
+    cmd: node ../../test/fixtures/fake-service.js --port=17072 --delay=600
+    port: 17072
+    depends_on: [registry]
+
+  gateway:
+    cmd: node ../../test/fixtures/fake-service.js --port=17070
+    port: 17070
+    depends_on: [account, menus]
+
+groups:
+  core: [account]
