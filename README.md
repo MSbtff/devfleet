@@ -36,6 +36,9 @@ devfleet      │ account-service    ✔ 준비  7071  12.4s  33190
 - **`init` 자동 분석**: Spring Boot 앱(Gradle·Maven, 단일·멀티 모듈)을 찾아 포트, Actuator 헬스 주소, 실행 명령을 채웁니다.
   `application.yml`의 `${PORT:7071}` 같은 플레이스홀더는 `.env` 값으로 해석합니다.
   `compose.yaml`이 있으면 `depends_on`에서 서비스 간 순서와 필요한 인프라(DB, Redis, Kafka 등)를 가져옵니다.
+- **Spring Cloud 구성 인식**: Config Server, Eureka, Consul, Nacos를 쓰는 앱은 해당 서버 뒤에 시작하도록 의존성을 채웁니다.
+  서버가 같은 프로젝트의 앱이면 그 앱에, 외부 제품이면 `compose.yaml`의 서비스를 찾아 infra에 넣고, 못 찾으면 경고합니다.
+  Config Server가 Eureka에 등록하고 Eureka가 설정을 Config Server에서 받는 구성처럼 서로 쓰는 경우에도 순환 없이 Config → Eureka 순서로 정리합니다.
 - **의존성 순서 + 헬스 대기**: 의존 서비스가 *준비된 뒤에* 시작합니다. 같은 단계의 서비스는 동시에 띄웁니다.
 - **실패 전파**: 시작 중 죽은 서비스는 마지막 로그를 보여 주고, 그 서비스에 의존하는 서비스는 건너뜁니다.
 - **포트 충돌 안내**: 포트를 누가 쓰는지 PID와 함께 알려 줍니다. 이미 떠 있는 정상 서비스(예: IDE에서 디버깅 중)는 그대로 재사용합니다.
@@ -146,11 +149,29 @@ npm run build       # dist/ 생성
 | `src/graph.ts` | 대상 서비스 계산, 순환 검사, 실행 단계 나누기 |
 | `src/runner.ts` | 프로세스 실행·헬스 대기·종료 정리 |
 | `src/init.ts` | Spring Boot·Compose 프로젝트 분석 |
+| `src/detectors.ts` | Spring Cloud 서버 감지 규칙 (Config, Eureka, Consul, Nacos) |
 | `src/health.ts`, `src/ports.ts` | 헬스체크, 포트 점유 확인 |
 | `src/logger.ts` | 색상 접두어 로그와 로그 파일 |
 
+### 감지 규칙 추가하기
+
+`src/detectors.ts`의 `RULES`에 객체 하나를 추가하면 `init`이 새 구성 요소를 인식합니다.
+
+```ts
+{
+  id: 'zookeeper',
+  label: 'Zookeeper',
+  infraImage: /zookeeper/,                                   // compose 서비스 이름·이미지로 서버 찾기
+  uses: (app) => /spring-cloud-starter-zookeeper/.test(app.buildText),
+}
+```
+
+서버가 같은 프로젝트의 Spring Boot 앱이라면 `serves: (app) => ...`로 서버 앱을 알아보게 합니다.
+배열 순서가 우선순위이며, 앞선 규칙과 순환이 생기는 의존성은 추가하지 않습니다.
+
 ## 로드맵
 
+- [ ] Node·Python·Go 서비스 자동 감지 (`package.json`, `pyproject.toml`, `go.mod`)
 - [ ] 일부는 Compose 컨테이너로, 수정 중인 서비스만 로컬로 띄우는 혼합 모드
 - [ ] 파일 변경 시 해당 서비스만 재시작 (`--watch`)
 - [ ] 실행 중인 서비스를 다른 터미널에서 재시작하는 `devfleet restart <이름>`
