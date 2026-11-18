@@ -132,6 +132,11 @@ groups:
 When `health` is omitted, the service is ready as soon as `port` accepts connections. With `health: none` it is ready right after it starts.
 HTTP health checks treat 2xx and 3xx responses as healthy. Spring Actuator returns 503 while a dependency such as the DB is DOWN, so devfleet waits until the service is actually usable.
 
+### Notes for Gradle `bootRun`
+
+- **The health timeout includes compile time.** On a cold start (no Gradle daemon, nothing compiled yet) every service starts its own daemon and compiles before the app boots. In the 9-service project above, the slowest service took about 20 seconds from a cold start, well within the 180-second default. Raise `health.timeout` for large modules.
+- **Each `bootRun` keeps a Gradle daemon busy.** A running `bootRun` occupies its daemon, so N services mean N daemons in addition to N application JVMs. In the same project this came to about 3.3 GB for the daemons and 3.1 GB for the apps and wrapper clients. If memory is tight, start only what you need (`devfleet up account-service`), or run the remaining services as Compose containers. Run `./gradlew --stop` afterwards to release the daemons.
+
 ## Example
 
 Try it without Spring:
@@ -153,7 +158,8 @@ npm run build       # produce dist/
 
 | File | Responsibility |
 |---|---|
-| `src/cli.ts` | Argument parsing and output |
+| `src/cli.ts` | Commands and output |
+| `src/args.ts` | Argument parsing |
 | `src/config.ts` | Reading and validating `devfleet.yaml` and `.env` |
 | `src/graph.ts` | Target resolution, cycle detection, start waves |
 | `src/runner.ts` | Process launch, health waiting, shutdown cleanup |
@@ -183,6 +189,7 @@ Rules are applied in array order, and a dependency that would create a cycle wit
 
 - [ ] English CLI messages
 - [ ] Detect Node, Python, and Go services (`package.json`, `pyproject.toml`, `go.mod`)
+- [ ] Jar mode: build once with `bootJar` and run `java -jar`, so Gradle daemons don't stay resident per service
 - [ ] `devfleet restart <name>` to restart one running service from another terminal
 - [ ] Restart a service when its files change (`--watch`)
 - [ ] Hybrid mode: run most services as Compose containers and only the ones you are editing locally
