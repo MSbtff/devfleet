@@ -63,7 +63,7 @@ export class Logger {
     return stream;
   }
 
-  /** 프로세스 출력 한 줄. 파일에는 항상 쓰고, 화면에는 옵션에 따라 보여준다. */
+  /** One line of process output. Always written to the file; shown on screen depending on options. */
   line(name: string, text: string): void {
     this.file(name)?.write(`${text}\n`);
     const tail = this.tails.get(name) ?? [];
@@ -82,12 +82,12 @@ export class Logger {
     readline.createInterface({ input: stream, crlfDelay: Infinity }).on('line', (text) => this.line(name, text));
   }
 
-  /** 출력이 숨겨져 있던 서비스가 실패했을 때 마지막 로그를 보여준다. */
+  /** Shows the last log lines of a service whose output was hidden, after it fails. */
   dumpTail(name: string): void {
     if (this.isVisible(name)) return;
     const tail = this.tails.get(name) ?? [];
     if (!tail.length) return;
-    this.system(this.paint(90, `── ${name} 마지막 로그 ${tail.length}줄 ──`));
+    this.system(this.paint(90, `── last ${tail.length} lines of ${name} ──`));
     for (const text of tail) this.out.write(`${this.prefix(name)}${text}\n`);
   }
 

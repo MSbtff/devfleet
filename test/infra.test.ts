@@ -35,12 +35,12 @@ test('한 번 실행하고 정상 종료한 컨테이너는 준비 완료로 본
   );
   const starting = evaluateInfra([c('mariadb', 'running', 'starting'), c('database-init', 'created')], services);
   assert.equal(starting.ready, false);
-  assert.deepEqual(starting.waiting, ['mariadb (running, starting)', 'database-init (created)', 'redis (컨테이너 없음)']);
+  assert.deepEqual(starting.waiting, ['mariadb (running, starting)', 'database-init (created)', 'redis (no container)']);
   const failed = evaluateInfra(
     [c('mariadb', 'running', 'unhealthy'), c('database-init', 'exited', '', 1), c('redis', 'running')],
     services,
   );
-  assert.deepEqual(failed.failures, ['mariadb: unhealthy', 'database-init: 종료됨 (exit 1)']);
+  assert.deepEqual(failed.failures, ['mariadb: unhealthy', 'database-init: exited (exit 1)']);
 });
 
 /** docker 대신 쓸 가짜 명령. ps를 두 번째 호출할 때부터 준비 완료 상태를 돌려준다. */
@@ -114,14 +114,14 @@ async function runWithFakeDocker(initExit: number) {
 test('초기화 컨테이너가 exit 0으로 끝나면 인프라 준비로 보고 앱을 띄운다', async () => {
   const { rows, text, calls } = await runWithFakeDocker(0);
   assert.equal(rows[0]?.status, 'ready');
-  assert.match(text, /infra 대기 중: mariadb \(running, starting\), database-init \(created\)/);
-  assert.match(text, /✔ infra 준비 완료/);
+  assert.match(text, /infra waiting for: mariadb \(running, starting\), database-init \(created\)/);
+  assert.match(text, /✔ infra ready in/);
   assert.doesNotMatch(calls, /--wait/, 'compose --wait는 one-shot 컨테이너를 실패로 보므로 쓰지 않는다');
 });
 
 test('초기화 컨테이너가 실패하면 원인과 확인 명령을 보여주고 앱은 건너뛴다', async () => {
   const { rows, text } = await runWithFakeDocker(1);
   assert.equal(rows[0]?.status, 'skipped');
-  assert.match(text, /준비되지 않았습니다: database-init: 종료됨 \(exit 1\)/);
+  assert.match(text, /not ready: database-init: exited \(exit 1\)/);
   assert.match(text, /docker compose logs database-init/);
 });

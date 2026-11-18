@@ -59,7 +59,7 @@ test('준비된 뒤 죽은 서비스는 crashed로 표시하고 숨겨져 있던
   assert.equal((await fleet.ready)[0]?.status, 'ready');
   await fleet.allExited;
   assert.equal(fleet.state.get('flaky')?.status, 'crashed');
-  assert.match(output(), /✖ flaky 프로세스가 종료됐습니다 \(code 4\)/);
+  assert.match(output(), /✖ flaky exited \(code 4\)/);
   assert.match(output(), /fatal: lost database connection/);
   await fleet.stop();
 });
@@ -86,7 +86,7 @@ test('헬스체크 시간 초과: 실패로 보고 의존 서비스는 건너뛰
     ],
   );
   assert.ok(rows[0]?.pid, '시간 초과된 프로세스는 계속 실행한다');
-  assert.match(output(), /1초 안에 준비되지 않았습니다 \(http:\/\/127\.0\.0\.1:\d+\/actuator\/health\)/);
+  assert.match(output(), /not ready after 1s \(http:\/\/127\.0\.0\.1:\d+\/actuator\/health\)/);
   await fleet.stop();
   assert.equal(await isPortOpen(slow), false);
 });
@@ -143,8 +143,8 @@ test('폴더나 서비스 env_file이 없으면 실행하지 않고 이유를 �
     rows.map((r) => r.status),
     ['failed', 'failed'],
   );
-  assert.match(output(), /nodir 폴더가 없습니다/);
-  assert.match(output(), /noenv env 파일을 찾을 수 없습니다/);
+  assert.match(output(), /nodir directory not found/);
+  assert.match(output(), /noenv env file not found/);
   await fleet.stop();
 });
 

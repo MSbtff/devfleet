@@ -121,7 +121,7 @@ test('Config Server를 Eureka보다 먼저 띄우고, 서로 쓰는 경우의 �
   assert.deepEqual(project.warnings, []);
 
   const text = renderConfig(project);
-  assert.match(text, /# Spring Cloud Config 서버\n {2}config:/);
+  assert.match(text, /# Spring Cloud Config server\n {2}config:/);
   const config = normalizeConfig(YAML.parse(text), root);
   assert.deepEqual(config.errors, []);
   assert.ok(text.indexOf('  config:') < text.indexOf('  registry:'));
@@ -152,6 +152,6 @@ test('Consul은 compose 서비스를 infra로 넣고, 서버를 못 찾은 Nacos
   assert.equal(project.warnings.length, 1);
   assert.match(project.warnings[0] ?? '', /Nacos.*stock/);
   const text = renderConfig(project);
-  assert.match(text, /# 확인 필요:\n# {3}- Nacos/);
+  assert.match(text, /# Please check:\n# {3}- Apps use Nacos \(stock\)/);
   assert.deepEqual(normalizeConfig(YAML.parse(text), root).errors, []);
 });

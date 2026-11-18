@@ -32,10 +32,10 @@ test('없는 의존성, 순환, 잘못된 그룹을 잡아낸다', () => {
     '/r',
   );
   assert.ok(bad.errors.some((e) => e.includes("'zzz'")));
-  assert.ok(bad.errors.some((e) => e.includes('cmd가 필요')));
+  assert.ok(bad.errors.some((e) => e.includes('cmd is required')));
   assert.ok(bad.errors.some((e) => e.includes("'nope'")));
   const cyclic = normalizeConfig({ services: { a: { cmd: 'x', depends_on: ['b'] }, b: { cmd: 'x', depends_on: ['a'] } } }, '/r');
-  assert.ok(cyclic.errors.some((e) => e.includes('순환 의존성')));
+  assert.ok(cyclic.errors.some((e) => e.includes('Dependency cycle')));
 });
 
 test('대상 서비스에 의존성을 포함하고 단계별로 묶는다', () => {

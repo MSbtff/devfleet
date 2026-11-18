@@ -22,22 +22,20 @@ devfleet up          # infra (Docker) → Eureka → business services → Gatew
 Output from a real 9-service project (all services ready in about 41 seconds):
 
 ```
-devfleet              │ ✔ infra 준비 완료 0.1s
-devfleet              │ ✔ eureka-server 준비 완료 6.1s · http://127.0.0.1:8761
-devfleet              │ account-service 시작: ./gradlew bootRun  (AccountService)
-devfleet              │ menus-service 시작: ./gradlew bootRun  (MenusService)
+devfleet              │ ✔ infra ready in 0.1s
+devfleet              │ ✔ eureka-server ready in 6.1s · http://127.0.0.1:8761
+devfleet              │ account-service starting: ./gradlew bootRun  (AccountService)
+devfleet              │ menus-service starting: ./gradlew bootRun  (MenusService)
 ...
-devfleet              │ ✔ gateway-server 준비 완료 5.1s · http://127.0.0.1:7070
+devfleet              │ ✔ gateway-server ready in 5.1s · http://127.0.0.1:7070
 devfleet              │
-devfleet              │ 서비스                 상태    포트  준비   PID
-devfleet              │ eureka-server          ✔ 준비  8761  6.1s   14719
-devfleet              │ account-service        ✔ 준비  7071  17.3s  14807
-devfleet              │ menus-service          ✔ 준비  7072  13.1s  14810
-devfleet              │ disposals-service      ✔ 준비  7077  6.1s   15066
-devfleet              │ gateway-server         ✔ 준비  7070  5.1s   15296
+devfleet              │ SERVICE            STATUS   PORT  READY  PID
+devfleet              │ eureka-server      ✔ ready  8761  6.1s   14719
+devfleet              │ account-service    ✔ ready  7071  17.3s  14807
+devfleet              │ menus-service      ✔ ready  7072  13.1s  14810
+devfleet              │ disposals-service  ✔ ready  7077  6.1s   15066
+devfleet              │ gateway-server     ✔ ready  7070  5.1s   15296
 ```
-
-> CLI messages are currently in Korean. English output is on the [roadmap](#roadmap).
 
 ## Features
 
@@ -187,7 +185,6 @@ Rules are applied in array order, and a dependency that would create a cycle wit
 
 ## Roadmap
 
-- [ ] English CLI messages
 - [ ] Detect Node, Python, and Go services (`package.json`, `pyproject.toml`, `go.mod`)
 - [ ] Jar mode: build once with `bootJar` and run `java -jar`, so Gradle daemons don't stay resident per service
 - [ ] `devfleet restart <name>` to restart one running service from another terminal

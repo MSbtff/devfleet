@@ -35,13 +35,13 @@ export async function checkOnce(health: Health): Promise<boolean> {
 
 export interface WaitOptions {
   signal?: AbortSignal;
-  /** false를 돌려주면 프로세스가 죽은 것으로 보고 기다림을 멈춘다 */
+  /** Returning false means the process died, so waiting stops */
   alive?: () => boolean;
   timeoutMs?: number;
   intervalMs?: number;
 }
 
-/** 헬스체크가 통과할 때까지 기다린다. */
+/** Waits until the health check passes. */
 export async function waitHealthy(
   health: Health,
   { signal, alive = () => true, timeoutMs, intervalMs }: WaitOptions = {},
@@ -69,6 +69,6 @@ export function describeHealth(health: Health): string {
     case 'tcp':
       return `tcp:${health.port}`;
     case 'none':
-      return '헬스체크 없음';
+      return 'no health check';
   }
 }

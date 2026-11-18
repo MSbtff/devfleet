@@ -95,8 +95,8 @@ test('parseArgs: 위치 인자, 긴/짧은 옵션, 별칭, --no-*, --', () => {
 });
 
 test('parseArgs: 값이 필요한 옵션에 값이 없으면 예외', () => {
-  assert.throws(() => parseArgs(['up', '--only']), /--only에 값이 필요합니다/);
-  assert.throws(() => parseArgs(['-c']), /--config에 값이 필요합니다/);
+  assert.throws(() => parseArgs(['up', '--only']), /--only needs a value/);
+  assert.throws(() => parseArgs(['-c']), /--config needs a value/);
 });
 
 // ---------------------------------------------------------------- 기본 명령
@@ -110,31 +110,31 @@ test('--version, 도움말, 알 수 없는 명령', async () => {
   for (const args of [[], ['help'], ['up', '--help']]) {
     const help = await run(args, cwd);
     assert.equal(help.code, 0);
-    assert.match(help.stdout, /사용법/);
+    assert.match(help.stdout, /Usage/);
   }
 
   const bad = await run(['launch'], cwd);
   assert.equal(bad.code, 1);
-  assert.match(bad.stderr, /알 수 없는 명령: launch/);
+  assert.match(bad.stderr, /Unknown command: launch/);
 
   const missing = await run(['up', '--config'], cwd);
   assert.equal(missing.code, 1);
-  assert.match(missing.stderr, /--config에 값이 필요합니다/);
+  assert.match(missing.stderr, /--config needs a value/);
 });
 
 test('설정 파일이 없거나 잘못되면 이유와 함께 exit 1', async () => {
   const empty = await run(['up'], tempDir());
   assert.equal(empty.code, 1);
-  assert.match(empty.stderr, /devfleet init`을 먼저 실행하세요/);
+  assert.match(empty.stderr, /Run `devfleet init` in the project root first/);
 
   const notFound = await run(['status', '-c', 'nope.yaml'], tempDir());
   assert.equal(notFound.code, 1);
-  assert.match(notFound.stderr, /찾지 못했습니다/);
+  assert.match(notFound.stderr, /not found/);
 
   const broken = project({ services: { a: { cmd: 'true', depends_on: ['ghost'] } } });
   const result = await run(['up'], broken);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /설정 오류/);
+  assert.match(result.stderr, /Invalid config/);
   assert.match(result.stderr, /ghost/);
 });
 
@@ -152,8 +152,8 @@ test('init: 만들기, 덮어쓰기 거부, --force, --print', async () => {
 
   const created = await run(['init'], root);
   assert.equal(created.code, 0, created.stderr);
-  assert.match(created.stdout, /devfleet\.yaml을 만들었습니다/);
-  assert.match(created.stdout, /Spring Boot 앱 1개: api/);
+  assert.match(created.stdout, /Created devfleet\.yaml/);
+  assert.match(created.stdout, /Spring Boot apps \(1\): api/);
   const file = path.join(root, 'devfleet.yaml');
   assert.match(fs.readFileSync(file, 'utf8'), /port: 8081/);
 
@@ -184,8 +184,8 @@ test('up --dry-run은 실행하지 않고 단계별 계획을 보여준다', asy
   });
   const plan = await run(['up', '--dry-run'], root);
   assert.equal(plan.code, 0, plan.stderr);
-  assert.match(plan.stdout, /1단계 \(동시 시작\)\n  db\n/);
-  assert.match(plan.stdout, /2단계 \(동시 시작\)\n  api ← db\n/);
+  assert.match(plan.stdout, /Wave 1 \(started together\)\n  db\n/);
+  assert.match(plan.stdout, /Wave 2 \(started together\)\n  api ← db\n/);
   assert.ok(!fs.existsSync(path.join(root, '.devfleet')), 'dry-run은 로그 폴더도 만들지 않는다');
 
   const unknown = await run(['up', 'ghost', '--dry-run'], root);
@@ -203,17 +203,17 @@ test('up → status → Ctrl+C: 모두 정리하고 exit 130, 이후 status·log
   });
   const up = start(['up'], root);
   try {
-    await up.waitFor(/Ctrl\+C로 모두 종료/);
+    await up.waitFor(/Ctrl\+C stops everything/);
     assert.match(up.output(), /a +│ listening/);
 
     const status = await run(['status'], root);
     assert.equal(status.code, 0);
-    assert.match(status.stdout, new RegExp(`a +${pa} +● 정상`));
-    assert.match(status.stdout, new RegExp(`b +${pb} +● 정상`));
+    assert.match(status.stdout, new RegExp(`a +${pa} +● healthy`));
+    assert.match(status.stdout, new RegExp(`b +${pb} +● healthy`));
 
     up.child.kill('SIGINT');
     assert.equal(await up.exited, 130);
-    assert.match(up.output(), /종료합니다… \(한 번 더 Ctrl\+C: 강제 종료\)/);
+    assert.match(up.output(), /Shutting down… \(press Ctrl\+C again to force\)/);
   } finally {
     up.child.kill('SIGKILL');
   }
@@ -221,7 +221,7 @@ test('up → status → Ctrl+C: 모두 정리하고 exit 130, 이후 status·log
   assert.equal(await isPortOpen(pb), false);
 
   const after = await run(['ps'], root);
-  assert.match(after.stdout, new RegExp(`a +${pa} +○ 중지`));
+  assert.match(after.stdout, new RegExp(`a +${pa} +○ stopped`));
 
   const logs = await run(['logs', 'a', '-n', '50'], root);
   assert.equal(logs.code, 0);
@@ -229,10 +229,10 @@ test('up → status → Ctrl+C: 모두 정리하고 exit 130, 이후 status·log
 
   const noName = await run(['logs'], root);
   assert.equal(noName.code, 1);
-  assert.match(noName.stderr, /서비스 이름을 지정하세요/);
+  assert.match(noName.stderr, /Name a service/);
   const unknown = await run(['logs', 'ghost'], root);
   assert.equal(unknown.code, 1);
-  assert.match(unknown.stderr, /알 수 없는 서비스: ghost/);
+  assert.match(unknown.stderr, /Unknown service: ghost/);
 });
 
 test('up: 모든 서비스가 시작에 실패하면 exit 1', async () => {
@@ -241,7 +241,7 @@ test('up: 모든 서비스가 시작에 실패하면 exit 1', async () => {
   const result = await run(['up', '-q'], root);
   assert.equal(result.code, 1);
   assert.match(result.stdout, /boom: fatal startup error/);
-  assert.match(result.stdout, /실행 중인 서비스가 없어 종료합니다/);
+  assert.match(result.stdout, /No services are running; exiting/);
 });
 
 test('up: 준비된 서비스가 모두 죽으면 exit 1', async () => {
@@ -249,8 +249,8 @@ test('up: 준비된 서비스가 모두 죽으면 exit 1', async () => {
   const root = project({ services: { flaky: { cmd: fake(`--port=${port} --crash-after-ready=2500`), port } } });
   const result = await run(['up'], root);
   assert.equal(result.code, 1);
-  assert.match(result.stdout, /flaky 프로세스가 종료됐습니다 \(code 4\)/);
-  assert.match(result.stdout, /직접 띄운 서비스가 모두 종료됐습니다/);
+  assert.match(result.stdout, /✖ flaky exited \(code 4\)/);
+  assert.match(result.stdout, /Every service started by devfleet has exited/);
 });
 
 test('up: Ctrl+C 두 번이면 stop_timeout을 기다리지 않고 강제 종료한다', async () => {
@@ -260,7 +260,7 @@ test('up: Ctrl+C 두 번이면 stop_timeout을 기다리지 않고 강제 종료
   });
   const up = start(['up'], root);
   try {
-    await up.waitFor(/Ctrl\+C로 모두 종료/);
+    await up.waitFor(/Ctrl\+C stops everything/);
     up.child.kill('SIGINT');
     await up.waitFor(/ignored SIGINT/);
     const started = Date.now();
@@ -277,5 +277,5 @@ test('down: infra 설정이 없으면 exit 1', async () => {
   const root = project({ services: { a: { cmd: 'true', health: 'none' } } });
   const result = await run(['down'], root);
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /infra가 없습니다/);
+  assert.match(result.stderr, /No infra is configured/);
 });
