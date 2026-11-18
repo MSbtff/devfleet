@@ -49,7 +49,7 @@ jobs:
           node --version
           mkdir -p /tmp/consumer && cd /tmp/consumer
           npm init -y > /dev/null
-          npm install "$GITHUB_WORKSPACE"/devfleet-*.tgz
+          npm install "$GITHUB_WORKSPACE"/*.tgz
           npx devfleet --version
           npx devfleet --help > /dev/null
           cd "$GITHUB_WORKSPACE/examples/demo" && /tmp/consumer/node_modules/.bin/devfleet up --dry-run
