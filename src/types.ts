@@ -22,6 +22,8 @@ export interface Infra {
   composeFiles: string[];
   services: string[];
   stopOnExit: boolean;
+  /** 인프라가 준비될 때까지 기다릴 초 */
+  timeout: number;
 }
 
 export interface Config {

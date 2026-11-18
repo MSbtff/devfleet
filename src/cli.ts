@@ -4,7 +4,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { findConfig, loadConfig, CONFIG_NAMES } from './config.ts';
-import { startFleet, planUp, formatSummary, formatTable, infraArgs, type Plan } from './runner.ts';
+import { startFleet, planUp, formatSummary, formatTable, displayPath, type Plan } from './runner.ts';
+import { composeArgs } from './infra.ts';
 import { detectProject, renderConfig } from './init.ts';
 import { isPortOpen, findListeners, describeListeners } from './ports.ts';
 import { checkOnce, describeHealth } from './health.ts';
@@ -113,9 +114,9 @@ function cmdInit(opts: Args): void {
 }
 
 function printPlan(config: Config, plan: Plan, opts: Args): void {
-  const rel = (p: string) => path.relative(config.root, p) || '.';
+  const rel = (p: string) => displayPath(config.root, p);
   if (opts.infra !== false && config.infra?.services.length) {
-    const args = infraArgs(config.infra, 'up', ['-d', '--wait']).map((a) => (path.isAbsolute(a) ? rel(a) : a));
+    const args = composeArgs(config.infra, 'up', ['-d']).map((a) => (path.isAbsolute(a) ? rel(a) : a));
     console.log(`infra: docker ${args.join(' ')}`);
   }
   if (plan.external.length) console.log(`이미 실행 중이어야 함: ${plan.external.join(', ')}`);
@@ -225,7 +226,7 @@ function cmdLogs(opts: Args): void {
 function cmdDown(opts: Args): void {
   const config = requireConfig(opts);
   if (!config.infra?.services.length) fail('설정에 infra가 없습니다.');
-  spawn('docker', infraArgs(config.infra, 'stop'), { cwd: config.root, stdio: 'inherit' }).on('exit', (code) =>
+  spawn('docker', composeArgs(config.infra, 'stop'), { cwd: config.root, stdio: 'inherit' }).on('exit', (code) =>
     process.exit(code ?? 1),
   );
 }
