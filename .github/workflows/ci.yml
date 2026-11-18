@@ -15,8 +15,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -27,3 +27,29 @@ jobs:
         run: |
           node dist/cli.js --version
           cd examples/demo && node ../../dist/cli.js up --dry-run
+
+  # package.json promises "node >=20". Tests need type stripping (22.18+),
+  # so build on 22 and run only the published CLI on 20.
+  runtime-node20:
+    name: runtime (ubuntu-latest, node 20)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm pack
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Install the packed tarball and run it on Node 20
+        run: |
+          node --version
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y > /dev/null
+          npm install "$GITHUB_WORKSPACE"/devfleet-*.tgz
+          npx devfleet --version
+          npx devfleet --help > /dev/null
+          cd "$GITHUB_WORKSPACE/examples/demo" && /tmp/consumer/node_modules/.bin/devfleet up --dry-run

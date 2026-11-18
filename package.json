@@ -2,12 +2,35 @@
   "name": "devfleet",
   "version": "0.1.0",
   "description": "Start local microservices in dependency order, wait for health checks, and collect their logs in one place",
+  "keywords": [
+    "microservices",
+    "msa",
+    "spring-boot",
+    "spring-cloud",
+    "eureka",
+    "docker-compose",
+    "gradle",
+    "local-development",
+    "process-manager",
+    "cli"
+  ],
+  "homepage": "https://github.com/MSbtff/devfleet#readme",
+  "bugs": {
+    "url": "https://github.com/MSbtff/devfleet/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MSbtff/devfleet.git"
+  },
+  "license": "MIT",
+  "author": "JongHwan (https://github.com/MSbtff)",
   "type": "module",
   "bin": {
     "devfleet": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20"
@@ -16,17 +39,9 @@
     "build": "tsc -p tsconfig.build.json && node -e \"require('fs').chmodSync('dist/cli.js',0o755)\"",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
-  "keywords": [
-    "microservices",
-    "msa",
-    "spring-boot",
-    "local-development",
-    "process-manager",
-    "cli"
-  ],
-  "license": "MIT",
   "dependencies": {
     "yaml": "^2.9.1"
   },
