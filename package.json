@@ -1,7 +1,7 @@
 {
   "name": "devfleet",
   "version": "0.1.0",
-  "description": "로컬에서 여러 마이크로서비스를 의존성 순서대로 띄우고, 헬스체크를 기다리고, 로그를 한 화면에 모아 보는 CLI",
+  "description": "Start local microservices in dependency order, wait for health checks, and collect their logs in one place",
   "type": "module",
   "bin": {
     "devfleet": "dist/cli.js"
