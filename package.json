@@ -1,5 +1,5 @@
 {
-  "name": "devfleet",
+  "name": "@devmsbtff/devfleet",
   "version": "0.1.0",
   "description": "Start local microservices in dependency order, wait for health checks, and collect their logs in one place",
   "keywords": [
@@ -48,5 +48,8 @@
   "devDependencies": {
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
