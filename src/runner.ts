@@ -6,7 +6,8 @@ import { resolveTargets, waves } from './graph.ts';
 import { isPortOpen, findListeners, describeListeners } from './ports.ts';
 import { checkOnce, waitHealthy, describeHealth, sleep } from './health.ts';
 import { Logger, type Output } from './logger.ts';
-import type { Config, Infra } from './types.ts';
+import { composeArgs, evaluateInfra, readInfraState, type InfraVerdict } from './infra.ts';
+import type { Config } from './types.ts';
 
 const IS_WIN = process.platform === 'win32';
 const INFRA = 'infra';
@@ -77,8 +78,11 @@ export function planUp(config: Config, names: readonly string[] = [], { deps = t
   return { targets, external, waves: waves(config.services, targets) };
 }
 
-export function infraArgs(infra: Infra, action: string, extra: readonly string[] = []): string[] {
-  return ['compose', ...infra.composeFiles.flatMap((f) => ['-f', f]), action, ...extra, ...infra.services];
+/** 설정 폴더 기준 상대 경로. 설정 폴더 밖이면 절대 경로를 그대로 보여준다. */
+export function displayPath(root: string, target: string): string {
+  const rel = path.relative(root, target);
+  if (!rel) return '.';
+  return rel.startsWith('..') || path.isAbsolute(rel) ? target : rel;
 }
 
 function isRunning(child: ChildProcess): boolean {
@@ -163,7 +167,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     const infraConfig = config.infra;
     if (!infra || !infraConfig?.services.length) return true;
     logger.info(INFRA, `docker compose up: ${infraConfig.services.join(', ')}`);
-    const child = spawn('docker', infraArgs(infraConfig, 'up', ['-d', '--wait']), {
+    const child = spawn('docker', composeArgs(infraConfig, 'up', ['-d']), {
       cwd: config.root,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -174,12 +178,41 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     infraChild = null;
     if (stopping) return false;
     if (code !== 0) {
-      logger.error(INFRA, '인프라를 시작하지 못했습니다. Docker가 실행 중인지 확인하세요.');
+      logger.error(INFRA, 'docker compose up이 실패했습니다. Docker 실행 여부와 compose 파일을 확인하세요.');
       logger.dumpTail(INFRA);
       return false;
     }
     infraStarted = true;
-    logger.ok(INFRA, '준비 완료');
+
+    // 한 번 실행하고 끝나는 초기화 컨테이너(exit 0)도 성공으로 보도록 상태를 직접 확인한다.
+    const startedAt = Date.now();
+    const deadline = startedAt + infraConfig.timeout * 1000;
+    let lastWaiting = '';
+    for (;;) {
+      if (stopping) return false;
+      let verdict: InfraVerdict;
+      try {
+        verdict = evaluateInfra(await readInfraState(infraConfig, config.root), infraConfig.services);
+      } catch (err) {
+        logger.error(INFRA, `컨테이너 상태를 읽지 못했습니다: ${(err as Error).message}`);
+        return false;
+      }
+      if (verdict.failures.length) {
+        logger.error(INFRA, `준비되지 않았습니다: ${verdict.failures.join(', ')}`);
+        logger.system(`  원인 확인: docker compose logs ${verdict.failures.map((f) => f.split(':')[0]).join(' ')}`);
+        return false;
+      }
+      if (verdict.ready) break;
+      const waiting = verdict.waiting.join(', ');
+      if (waiting !== lastWaiting) logger.info(INFRA, `대기 중: ${waiting}`);
+      lastWaiting = waiting;
+      if (Date.now() >= deadline) {
+        logger.error(INFRA, `${infraConfig.timeout}초 안에 준비되지 않았습니다: ${waiting}`);
+        return false;
+      }
+      await sleep(1000, abort.signal);
+    }
+    logger.ok(INFRA, `준비 완료 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
     return true;
   }
 
@@ -233,7 +266,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       return false;
     }
 
-    logger.info(name, `시작: ${svc.cmd}  (${path.relative(config.root, svc.dir) || '.'})`);
+    logger.info(name, `시작: ${svc.cmd}  (${displayPath(config.root, svc.dir)})`);
     const child = spawn(svc.cmd, {
       cwd: svc.dir,
       env,
@@ -333,7 +366,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     if (svc.port && (await isPortOpen(svc.port))) {
       const listeners = await findListeners(svc.port);
       for (const l of listeners) {
-        logger.warn(name, `포트 ${svc.port}에 남은 PID ${l.pid}(${l.command})를 종료합니다`);
+        logger.info(name, `포트 ${svc.port}에 남은 PID ${l.pid}(${l.command}) 정리 (Gradle 데몬이 띄운 JVM 등)`);
         killPid(l.pid, force ? 'SIGKILL' : 'SIGTERM');
       }
       if (!force && listeners.length && !(await waitPortClosed(svc.port, 10_000))) {
@@ -355,7 +388,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       const infraConfig = config.infra;
       if (infraStarted && infraConfig && (stopInfra || infraConfig.stopOnExit)) {
         logger.info(INFRA, 'docker compose stop');
-        const child = spawn('docker', infraArgs(infraConfig, 'stop'), {
+        const child = spawn('docker', composeArgs(infraConfig, 'stop'), {
           cwd: config.root,
           stdio: ['ignore', 'pipe', 'pipe'],
         });

@@ -89,10 +89,11 @@ env_file: .env                 # 모든 서비스에 주입할 환경변수 파�
 env:                           # 추가 환경변수 (env_file보다 우선)
   SPRING_PROFILES_ACTIVE: local
 
-infra:                         # 앱보다 먼저 docker compose up -d --wait 로 띄울 서비스
+infra:                         # 앱보다 먼저 docker compose up -d 로 띄울 서비스
   compose_file: compose.yaml   # 여러 개면 compose_files: [a.yaml, b.yaml]
   services: [mariadb, redis, kafka]
   stop_on_exit: false
+  timeout: 180                 # 컨테이너가 healthy(또는 초기화 컨테이너가 exit 0)가 될 때까지 기다릴 초
 
 services:
   eureka-server:

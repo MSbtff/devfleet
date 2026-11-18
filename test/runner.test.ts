@@ -93,7 +93,7 @@ test('Gradle 데몬처럼 프로세스 그룹 밖에 남은 앱도 포트 기준
   const fleet = startFleet(config, [], { out, color: false });
   assert.equal((await fleet.ready)[0].status, 'ready');
   await fleet.stop();
-  assert.match(output(), /남은 PID \d+/);
+  assert.match(output(), /남은 PID \d+.* 정리/);
   assert.equal(await isPortOpen(port), false);
 });
 

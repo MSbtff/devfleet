@@ -122,6 +122,7 @@ export function normalizeConfig(raw: unknown, root: string): Config {
       ),
       services: toList(data.infra.services),
       stopOnExit: Boolean(data.infra.stop_on_exit),
+      timeout: Number(data.infra.timeout ?? DEFAULT_HEALTH_TIMEOUT),
     };
   }
 
