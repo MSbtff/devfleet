@@ -1,6 +1,7 @@
 # devfleet
 
 [![CI](https://github.com/MSbtff/devfleet/actions/workflows/ci.yml/badge.svg)](https://github.com/MSbtff/devfleet/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/devfleet.svg)](https://www.npmjs.com/package/devfleet)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A CLI that starts many microservices locally **in dependency order**, **waits until each one is healthy**, and **collects all logs in one place**.
@@ -55,6 +56,13 @@ devfleet              │ gateway-server     ✔ ready  7070  5.1s   15296
 ## Installation
 
 Requires Node.js 20 or later.
+
+```bash
+npx devfleet init           # try it without installing
+npm install -g devfleet     # or install the devfleet command globally
+```
+
+From source:
 
 ```bash
 git clone https://github.com/MSbtff/devfleet.git && cd devfleet
