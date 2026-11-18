@@ -2,18 +2,18 @@ import { execFile } from 'node:child_process';
 import { isRecord, type Infra } from './types.ts';
 
 /**
- * Docker Compose 인프라의 준비 상태 판단.
+ * Readiness of Docker Compose infrastructure.
  *
- * `docker compose up --wait`는 DB 초기화처럼 한 번 실행하고 끝나는(exit 0) 컨테이너를
- * 실패로 보기 때문에 쓰지 않는다. 대신 `docker compose ps --all --format json`으로 상태를 읽어
- * 직접 판단한다.
+ * `docker compose up --wait` treats one-shot containers that exit 0 (such as DB init jobs) as
+ * failures, so it is not used. Instead the state is read with `docker compose ps --all --format json`
+ * and evaluated here.
  */
 
 export interface ContainerState {
   service: string;
   /** running, exited, restarting, created, dead … */
   state: string;
-  /** healthy, unhealthy, starting, 또는 헬스체크가 없으면 '' */
+  /** healthy, unhealthy, starting, or '' when there is no health check */
   health: string;
   exitCode: number;
 }
@@ -28,7 +28,7 @@ export function composeArgs(infra: Infra, action: string, extra: readonly string
   return ['compose', ...infra.composeFiles.flatMap((f) => ['-f', f]), action, ...extra, ...infra.services];
 }
 
-/** compose 버전에 따라 JSON 배열 또는 줄마다 JSON 객체(NDJSON)로 나온다. 둘 다 읽는다. */
+/** Depending on the compose version, output is a JSON array or one JSON object per line (NDJSON). Both are accepted. */
 export function parseComposePs(output: string): ContainerState[] {
   const text = output.trim();
   if (!text) return [];
@@ -52,12 +52,12 @@ export function evaluateInfra(containers: readonly ContainerState[], services: r
   for (const service of services) {
     const mine = containers.filter((c) => c.service === service);
     if (!mine.length) {
-      waiting.push(`${service} (컨테이너 없음)`);
+      waiting.push(`${service} (no container)`);
       continue;
     }
     for (const c of mine) {
-      if (c.state === 'exited' && c.exitCode === 0) continue; // 한 번 실행하고 정상 종료한 컨테이너
-      if (c.state === 'exited' || c.state === 'dead') failures.push(`${service}: 종료됨 (exit ${c.exitCode})`);
+      if (c.state === 'exited' && c.exitCode === 0) continue; // one-shot container that exited successfully
+      if (c.state === 'exited' || c.state === 'dead') failures.push(`${service}: exited (exit ${c.exitCode})`);
       else if (c.health === 'unhealthy') failures.push(`${service}: unhealthy`);
       else if (c.state === 'running' && (c.health === '' || c.health === 'healthy')) continue;
       else waiting.push(`${service} (${c.health ? `${c.state}, ${c.health}` : c.state})`);

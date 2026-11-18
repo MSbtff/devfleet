@@ -7,7 +7,7 @@ import { isRecord, type Config, type Health, type Infra, type Service } from './
 export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'] as const;
 const DEFAULT_HEALTH_TIMEOUT = 180;
 
-/** 현재 폴더부터 상위로 올라가며 설정 파일을 찾는다. */
+/** Looks for the config file from the current folder upwards. */
 export function findConfig(start: string = process.cwd()): string | null {
   let dir = path.resolve(start);
   for (;;) {
@@ -21,7 +21,7 @@ export function findConfig(start: string = process.cwd()): string | null {
   }
 }
 
-/** `set -a; source .env`로 읽히는 단순한 KEY=VALUE 형식을 해석한다. */
+/** Parses the simple KEY=VALUE format that `set -a; source .env` understands. */
 export function parseEnv(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -45,7 +45,7 @@ export function parseEnv(text: string): Record<string, string> {
 
 export function readEnvFile(file: string | null): Record<string, string> {
   if (!file) return {};
-  if (!fs.existsSync(file)) throw new Error(`env 파일을 찾을 수 없습니다: ${file}`);
+  if (!fs.existsSync(file)) throw new Error(`env file not found: ${file}`);
   return parseEnv(fs.readFileSync(file, 'utf8'));
 }
 
@@ -55,33 +55,33 @@ export function loadConfig(file: string): Config {
   try {
     raw = YAML.parse(fs.readFileSync(file, 'utf8')) ?? {};
   } catch (err) {
-    throw new Error(`${path.basename(file)}을 읽을 수 없습니다: ${(err as Error).message}`);
+    throw new Error(`Cannot read ${path.basename(file)}: ${(err as Error).message}`);
   }
   const config = normalizeConfig(raw, root);
   config.file = path.resolve(file);
   return config;
 }
 
-/** YAML에서 읽은 값을 검증하고 내부 형식으로 바꾼다. 문제는 throw하지 않고 errors에 모은다. */
+/** Validates the parsed YAML and converts it to the internal form. Problems are collected in errors instead of thrown. */
 export function normalizeConfig(raw: unknown, root: string): Config {
   const errors: string[] = [];
   const data = isRecord(raw) ? raw : {};
-  if (raw != null && !isRecord(raw)) errors.push('설정 파일의 최상위는 "키: 값" 형태여야 합니다.');
+  if (raw != null && !isRecord(raw)) errors.push('The top level of the config file must be a "key: value" mapping.');
 
   const services: Record<string, Service> = {};
   const rawServices = data.services ?? {};
   if (!isRecord(rawServices)) {
-    errors.push('services는 "이름: 설정" 형태여야 합니다.');
+    errors.push('services must be a "name: settings" mapping.');
   } else {
     for (const [name, s] of Object.entries(rawServices)) {
       if (!isRecord(s)) {
-        errors.push(`${name}: 설정이 비어 있습니다.`);
+        errors.push(`${name}: settings are empty.`);
         continue;
       }
-      if (!s.cmd) errors.push(`${name}: cmd가 필요합니다.`);
+      if (!s.cmd) errors.push(`${name}: cmd is required.`);
       const port = s.port == null ? null : Number(s.port);
       if (port != null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
-        errors.push(`${name}: port는 1~65535 사이 정수여야 합니다.`);
+        errors.push(`${name}: port must be an integer between 1 and 65535.`);
       }
       services[name] = {
         name,
@@ -99,18 +99,18 @@ export function normalizeConfig(raw: unknown, root: string): Config {
 
   for (const svc of Object.values(services)) {
     for (const dep of svc.dependsOn) {
-      if (!services[dep]) errors.push(`${svc.name}: depends_on에 정의되지 않은 서비스 '${dep}'가 있습니다.`);
+      if (!services[dep]) errors.push(`${svc.name}: depends_on refers to undefined service '${dep}'.`);
     }
   }
   const cycle = errors.length ? null : findCycle(services);
-  if (cycle) errors.push(`순환 의존성이 있습니다: ${cycle.join(' → ')}`);
+  if (cycle) errors.push(`Dependency cycle: ${cycle.join(' → ')}`);
 
   const groups: Record<string, string[]> = {};
   for (const [group, list] of Object.entries(isRecord(data.groups) ? data.groups : {})) {
-    if (services[group]) errors.push(`groups.${group}: 서비스 이름과 같은 그룹 이름은 쓸 수 없습니다.`);
+    if (services[group]) errors.push(`groups.${group}: a group cannot have the same name as a service.`);
     groups[group] = toList(list);
     for (const name of groups[group]) {
-      if (!services[name]) errors.push(`groups.${group}: 정의되지 않은 서비스 '${name}'가 있습니다.`);
+      if (!services[name]) errors.push(`groups.${group}: refers to undefined service '${name}'.`);
     }
   }
 
@@ -145,11 +145,11 @@ function normalizeHealth(health: unknown, port: number | null, name: string, err
     if (/^https?:\/\//.test(health)) return { ...base, type: 'http', url: health };
     if (health === 'none') return { ...base, type: 'none' };
     if (health === 'tcp' && port) return { ...base, type: 'tcp', port };
-    errors.push(`${name}: health는 http(s) 주소, "tcp", "none" 중 하나여야 합니다.`);
+    errors.push(`${name}: health must be an http(s) URL, "tcp", or "none".`);
     return { ...base, type: 'none' };
   }
   if (!isRecord(health)) {
-    errors.push(`${name}: health 형식이 올바르지 않습니다.`);
+    errors.push(`${name}: invalid health setting.`);
     return { ...base, type: 'none' };
   }
   const merged = {

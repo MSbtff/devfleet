@@ -19,13 +19,13 @@ function tryConnect(port: number, host: string, timeoutMs: number): Promise<bool
   });
 }
 
-/** 로컬에서 해당 포트로 접속되는지 확인한다 (IPv4, IPv6 모두). */
+/** Checks whether the port accepts local connections (IPv4 and IPv6). */
 export async function isPortOpen(port: number, timeoutMs = 500): Promise<boolean> {
   if (await tryConnect(port, '127.0.0.1', timeoutMs)) return true;
   return tryConnect(port, '::1', timeoutMs);
 }
 
-/** 포트를 LISTEN 중인 프로세스 목록. lsof가 없으면 빈 배열. */
+/** Processes listening on the port. Empty when lsof is unavailable. */
 export function findListeners(port: number): Promise<Listener[]> {
   if (process.platform === 'win32') return Promise.resolve([]);
   return new Promise((resolve) => {
@@ -47,5 +47,5 @@ export function findListeners(port: number): Promise<Listener[]> {
 }
 
 export function describeListeners(listeners: readonly Listener[]): string {
-  return listeners.length ? listeners.map((l) => `PID ${l.pid} ${l.command}`.trim()).join(', ') : '알 수 없는 프로세스';
+  return listeners.length ? listeners.map((l) => `PID ${l.pid} ${l.command}`.trim()).join(', ') : 'unknown process';
 }

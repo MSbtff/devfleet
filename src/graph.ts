@@ -1,6 +1,6 @@
 import type { DependencyMap } from './types.ts';
 
-/** 순환 의존성이 있으면 경로를, 없으면 null을 돌려준다. */
+/** Returns the cycle path if there is a dependency cycle, otherwise null. */
 export function findCycle(services: DependencyMap): string[] | null {
   const state = new Map<string, 'visiting' | 'done'>();
   const stack: string[] = [];
@@ -33,7 +33,7 @@ interface TargetSource {
   groups: Record<string, string[]>;
 }
 
-/** 이름(서비스 또는 그룹) 목록을 실제 실행할 서비스 목록으로 바꾼다. 설정 파일 순서를 유지한다. */
+/** Expands service or group names into the services to run, in config-file order. */
 export function resolveTargets(
   config: TargetSource,
   names: readonly string[] = [],
@@ -47,7 +47,7 @@ export function resolveTargets(
     else if (config.services[name]) selected.add(name);
     else unknown.push(name);
   }
-  if (unknown.length) throw new Error(`알 수 없는 서비스 또는 그룹: ${unknown.join(', ')}`);
+  if (unknown.length) throw new Error(`Unknown service or group: ${unknown.join(', ')}`);
   if (!names.length) Object.keys(config.services).forEach((n) => selected.add(n));
   if (withDeps) {
     const stack = [...selected];
@@ -64,7 +64,7 @@ export function resolveTargets(
   return Object.keys(config.services).filter((n) => selected.has(n));
 }
 
-/** 의존성 깊이별로 묶는다. 같은 단계의 서비스는 동시에 시작할 수 있다. */
+/** Groups services by dependency depth. Services in the same wave can start in parallel. */
 export function waves(services: DependencyMap, names: readonly string[]): string[][] {
   const set = new Set(names);
   const level = new Map<string, number>();

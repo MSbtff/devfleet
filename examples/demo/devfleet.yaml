@@ -1,4 +1,4 @@
-# Spring 없이 devfleet 동작을 바로 확인해 보는 예제입니다.
+# Try devfleet right away, without Spring.
 #   cd examples/demo && node ../../dist/cli.js up
 env:
   FAKE_VAR: demo

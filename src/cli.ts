@@ -12,28 +12,28 @@ import { checkOnce, describeHealth } from './health.ts';
 import type { Config } from './types.ts';
 import { parseArgs, type Args } from './args.ts';
 
-// src/cli.ts와 dist/cli.js 모두 한 단계 위에 package.json이 있다.
+// Both src/cli.ts and dist/cli.js have package.json one level up.
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
-const HELP = `devfleet ${version} — 로컬 MSA 서비스를 한 번에 띄우는 CLI
+const HELP = `devfleet ${version} — start local microservices in dependency order
 
-사용법
-  devfleet init                  프로젝트를 분석해 devfleet.yaml 초안 생성
-  devfleet up [이름...]           서비스(또는 그룹)를 의존성 순서대로 실행
-  devfleet status                각 서비스의 포트·헬스 상태 확인
-  devfleet logs <이름> [-f]       서비스 로그 파일 보기
-  devfleet down                  infra 컨테이너 정지
+Usage
+  devfleet init                  analyze the project and create a devfleet.yaml draft
+  devfleet up [name...]          start services (or groups) in dependency order
+  devfleet status                show each service's port and health
+  devfleet logs <name> [-f]      show a service's log file
+  devfleet down                  stop the infra containers
 
-up 옵션
-  --no-deps        의존 서비스는 띄우지 않고, 이미 실행 중인지 확인만 함
-  --no-infra       Docker Compose 인프라를 건드리지 않음
-  --down           종료할 때 인프라 컨테이너도 정지
-  --only a,b       화면에는 지정한 서비스 로그만 표시 (파일에는 모두 기록)
-  -q, --quiet      화면에는 상태 메시지만 표시
-  --dry-run        실제로 실행하지 않고 실행 계획만 출력
+Options for up
+  --no-deps        don't start dependencies; only check that they are running
+  --no-infra       leave Docker Compose infrastructure alone
+  --down           also stop the infra containers on exit
+  --only a,b       show only these services' logs on screen (files get everything)
+  -q, --quiet      show only status messages on screen
+  --dry-run        print the start plan without running anything
 
-공통 옵션
-  -c, --config <파일>   설정 파일 경로 (기본: 현재 폴더부터 위로 ${CONFIG_NAMES[0]} 탐색)
+Common options
+  -c, --config <file>   config file (default: search for ${CONFIG_NAMES[0]} from the current folder upwards)
   -h, --help / -v, --version
 `;
 
@@ -48,10 +48,10 @@ function requireConfig(opts: Args): Config {
   const configPath = str(opts.config);
   const file = configPath ? path.resolve(configPath) : findConfig();
   if (!file || !fs.existsSync(file)) {
-    fail(`${CONFIG_NAMES[0]}을 찾지 못했습니다. 프로젝트 루트에서 \`devfleet init\`을 먼저 실행하세요.`);
+    fail(`${CONFIG_NAMES[0]} not found. Run \`devfleet init\` in the project root first.`);
   }
   const config = loadConfig(file);
-  if (config.errors.length) fail(`설정 오류 (${file})\n  - ${config.errors.join('\n  - ')}`);
+  if (config.errors.length) fail(`Invalid config (${file})\n  - ${config.errors.join('\n  - ')}`);
   return config;
 }
 
@@ -64,16 +64,16 @@ function cmdInit(opts: Args): void {
     process.stdout.write(text);
     return;
   }
-  if (fs.existsSync(target) && !opts.force) fail(`${CONFIG_NAMES[0]}이 이미 있습니다. 덮어쓰려면 --force를 붙이세요.`);
+  if (fs.existsSync(target) && !opts.force) fail(`${CONFIG_NAMES[0]} already exists. Use --force to overwrite it.`);
   fs.writeFileSync(target, text);
-  console.log(`${CONFIG_NAMES[0]}을 만들었습니다.`);
-  console.log(`  Spring Boot 앱 ${project.apps.length}개: ${project.apps.map((a) => a.name).join(', ') || '없음'}`);
+  console.log(`Created ${CONFIG_NAMES[0]}.`);
+  console.log(`  Spring Boot apps (${project.apps.length}): ${project.apps.map((a) => a.name).join(', ') || 'none'}`);
   for (const app of project.apps.filter((a) => a.roles.length)) {
-    console.log(`  ${app.roles.join(', ')} 서버: ${app.name} (이 서버를 쓰는 앱은 그 뒤에 시작)`);
+    console.log(`  ${app.roles.join(', ')} server: ${app.name} (apps that use it start after it)`);
   }
-  if (project.infra.length) console.log(`  인프라 (${project.composeFile}): ${project.infra.join(', ')}`);
+  if (project.infra.length) console.log(`  Infra (${project.composeFile}): ${project.infra.join(', ')}`);
   for (const warning of project.warnings) console.log(`  ! ${warning}`);
-  console.log('내용을 확인한 뒤 `devfleet up`으로 실행하세요. 로그는 .devfleet/logs에 쌓이니 .gitignore에 추가하세요.');
+  console.log('Review it, then run `devfleet up`. Logs are written to .devfleet/logs, so add it to .gitignore.');
 }
 
 function printPlan(config: Config, plan: Plan, opts: Args): void {
@@ -82,15 +82,15 @@ function printPlan(config: Config, plan: Plan, opts: Args): void {
     const args = composeArgs(config.infra, 'up', ['-d']).map((a) => (path.isAbsolute(a) ? rel(a) : a));
     console.log(`infra: docker ${args.join(' ')}`);
   }
-  if (plan.external.length) console.log(`이미 실행 중이어야 함: ${plan.external.join(', ')}`);
+  if (plan.external.length) console.log(`Must already be running: ${plan.external.join(', ')}`);
   plan.waves.forEach((wave, i) => {
-    console.log(`${i + 1}단계 (동시 시작)`);
+    console.log(`Wave ${i + 1} (started together)`);
     for (const name of wave) {
       const svc = config.services[name]!;
       const deps = svc.dependsOn.length ? ` ← ${svc.dependsOn.join(', ')}` : '';
       console.log(`  ${name}${deps}`);
       console.log(`    ${svc.cmd}  @ ${rel(svc.dir)}`);
-      console.log(`    준비 확인: ${describeHealth(svc.health)}`);
+      console.log(`    ready when: ${describeHealth(svc.health)}`);
     }
   });
 }
@@ -129,7 +129,7 @@ async function cmdUp(opts: Args): Promise<void> {
   const onSignal = () => {
     signals += 1;
     if (signals === 1) {
-      logger.system('종료합니다… (한 번 더 Ctrl+C: 강제 종료)');
+      logger.system('Shutting down… (press Ctrl+C again to force)');
       void shutdown(130);
     } else {
       void fleet.stop({ force: true }).then(() => process.exit(130));
@@ -146,14 +146,14 @@ async function cmdUp(opts: Args): Promise<void> {
   const failed = rows.filter((r) => r.status === 'failed' || r.status === 'skipped');
   logger.system('');
   if (!running.length) {
-    logger.system(failed.length ? '실행 중인 서비스가 없어 종료합니다.' : '새로 띄운 서비스가 없습니다.');
+    logger.system(failed.length ? 'No services are running; exiting.' : 'No new services were started.');
     return shutdown(failed.length ? 1 : 0);
   }
-  logger.system(`로그: ${path.relative(process.cwd(), config.logDir) || '.'}/<서비스>.log · Ctrl+C로 모두 종료`);
+  logger.system(`Logs: ${path.relative(process.cwd(), config.logDir) || '.'}/<service>.log · Ctrl+C stops everything`);
 
   await fleet.allExited;
   if (signals) return;
-  logger.system('직접 띄운 서비스가 모두 종료됐습니다.');
+  logger.system('Every service started by devfleet has exited.');
   return shutdown(1);
 }
 
@@ -163,32 +163,32 @@ async function cmdStatus(opts: Args): Promise<void> {
     Object.values(config.services).map(async (svc): Promise<string[]> => {
       if (!svc.port) {
         const ok = svc.health.type !== 'none' && (await checkOnce(svc.health));
-        return [svc.name, '', ok ? '● 정상' : '? 포트 없음', ''];
+        return [svc.name, '', ok ? '● healthy' : '? no port', ''];
       }
       const port = String(svc.port);
-      if (!(await isPortOpen(svc.port))) return [svc.name, port, '○ 중지', ''];
+      if (!(await isPortOpen(svc.port))) return [svc.name, port, '○ stopped', ''];
       const who = describeListeners(await findListeners(svc.port));
       const healthy = await checkOnce(svc.health);
-      return [svc.name, port, healthy ? '● 정상' : '◐ 포트 열림, 헬스 실패', who];
+      return [svc.name, port, healthy ? '● healthy' : '◐ port open, health failing', who];
     }),
   );
-  console.log(formatTable([['서비스', '포트', '상태', '프로세스'], ...rows]));
+  console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'PROCESS'], ...rows]));
 }
 
 function cmdLogs(opts: Args): void {
   const config = requireConfig(opts);
   const name = opts._[0];
-  if (!name) fail('서비스 이름을 지정하세요. 예: devfleet logs account-service -f');
-  if (!config.services[name] && name !== 'infra') fail(`알 수 없는 서비스: ${name}`);
+  if (!name) fail('Name a service, e.g. devfleet logs account-service -f');
+  if (!config.services[name] && name !== 'infra') fail(`Unknown service: ${name}`);
   const file = path.join(config.logDir, `${name}.log`);
-  if (!fs.existsSync(file)) fail(`아직 로그가 없습니다: ${path.relative(process.cwd(), file)}`);
+  if (!fs.existsSync(file)) fail(`No logs yet: ${path.relative(process.cwd(), file)}`);
   const args = ['-n', str(opts.n) ?? '100', ...(opts.follow ? ['-f'] : []), file];
   spawn('tail', args, { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 0));
 }
 
 function cmdDown(opts: Args): void {
   const config = requireConfig(opts);
-  if (!config.infra?.services.length) fail('설정에 infra가 없습니다.');
+  if (!config.infra?.services.length) fail('No infra is configured.');
   spawn('docker', composeArgs(config.infra, 'stop'), { cwd: config.root, stdio: 'inherit' }).on('exit', (code) =>
     process.exit(code ?? 1),
   );
@@ -216,6 +216,6 @@ if (opts.version) {
   process.stdout.write(HELP);
 } else {
   const run = COMMANDS[command];
-  if (!run) fail(`알 수 없는 명령: ${command}\n\n${HELP}`);
+  if (!run) fail(`Unknown command: ${command}\n\n${HELP}`);
   Promise.resolve(run(opts)).catch((err: Error) => fail(err.stack ?? err.message));
 }

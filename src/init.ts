@@ -30,7 +30,7 @@ export interface DetectedApp extends FoundApp {
   runDir: string;
   cmd: string;
   facts: AppFacts;
-  /** 이 앱이 맡은 서버 역할 (예: Spring Cloud Config) */
+  /** Server roles this app fills (e.g. Spring Cloud Config) */
   roles: string[];
   dependsOn: string[];
 }
@@ -41,7 +41,7 @@ export interface DetectedProject {
   apps: DetectedApp[];
   composeFile: string | null;
   infra: string[];
-  /** 사용자가 직접 확인해야 할 점 */
+  /** Things the user should check by hand */
   warnings: string[];
 }
 
@@ -57,7 +57,7 @@ interface ComposeProject {
   services: Record<string, ComposeService>;
 }
 
-/** 프로젝트를 훑어 Spring Boot 앱과 Compose 구성을 찾는다. */
+/** Scans the project for Spring Boot apps and the Compose setup. */
 export function detectProject(rootDir: string, { useDocker = true }: { useDocker?: boolean } = {}): DetectedProject {
   const root = path.resolve(rootDir);
   const envFile = fs.existsSync(path.join(root, '.env')) ? '.env' : null;
@@ -92,7 +92,7 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
     app.name = name;
   }
 
-  // Compose의 depends_on을 따라가며 앱 간 의존성과 필요한 인프라를 모은다.
+  // Follow Compose depends_on to collect app dependencies and required infra.
   const infra = new Set<string>();
   const addInfra = (name: string): void => {
     const svc = compose?.services[name];
@@ -111,8 +111,8 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
     }
   }
 
-  // Spring Cloud 서버(Config, Eureka, Consul, Nacos 등)를 쓰는 앱은 서버 뒤에 시작한다.
-  // compose의 depends_on에 빠져 있는 경우도 많아서 compose 앱에도 적용한다.
+  // Apps that use a Spring Cloud server (Config, Eureka, Consul, Nacos, ...) start after it.
+  // Compose depends_on often omits this, so it is applied to Compose apps as well.
   const warnings: string[] = [];
   for (const rule of RULES) {
     const users = apps.filter((a) => rule.uses(a.facts));
@@ -129,8 +129,8 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
       continue;
     }
     warnings.push(
-      `${rule.label}을(를) 쓰는 앱(${users.map((a) => a.name).join(', ')})이 있지만 ` +
-        `${rule.label} 서버를 찾지 못했습니다. 직접 띄우거나 compose.yaml에 추가해 infra로 지정하세요.`,
+      `Apps use ${rule.label} (${users.map((a) => a.name).join(', ')}), ` +
+        `but no ${rule.label} server was found. Start it yourself, or add it to compose.yaml and list it under infra.`,
     );
   }
 
@@ -144,7 +144,7 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
   };
 }
 
-/** app이 target 뒤에 시작하도록 의존성을 추가한다. 순환이 생기면 추가하지 않는다. */
+/** Makes app start after target. Skipped when it would create a cycle. */
 function addDependency(apps: readonly DetectedApp[], app: DetectedApp, target: DetectedApp): boolean {
   if (app === target || app.dependsOn.includes(target.name)) return false;
   const byName = new Map(apps.map((a) => [a.name, a]));
@@ -230,7 +230,7 @@ function runCommand(app: FoundApp, root: string): { runDir: string; cmd: string 
   const wrapper = gradle ? 'gradlew' : 'mvnw';
   const task = gradle ? 'bootRun' : 'spring-boot:run';
   if (fs.existsSync(path.join(app.dir, wrapper))) return { runDir: app.dir, cmd: `./${wrapper} ${task}` };
-  // 루트(멀티 모듈)의 래퍼를 찾아 하위 프로젝트를 지정해 실행한다.
+  // Use the root (multi-module) wrapper and run the subproject by path.
   for (let dir = path.dirname(app.dir); dir.startsWith(root); dir = path.dirname(dir)) {
     if (fs.existsSync(path.join(dir, wrapper))) {
       const rel = path.relative(dir, app.dir).split(path.sep);
@@ -242,7 +242,7 @@ function runCommand(app: FoundApp, root: string): { runDir: string; cmd: string 
   return { runDir: app.dir, cmd: gradle ? 'gradle bootRun' : 'mvn spring-boot:run' };
 }
 
-/** application.yml/properties에서 기본 프로필 값을 평평한 key 맵으로 읽는다. */
+/** Reads default-profile values from application.yml/properties into a flat key map. */
 export function readSpringProps(file: string): Record<string, unknown> {
   const text = fs.readFileSync(file, 'utf8');
   const result: Record<string, unknown> = {};
@@ -274,7 +274,7 @@ function flatten(value: Record<string, unknown>, prefix: string, out: Record<str
   }
 }
 
-/** ${NAME:default} 형식을 .env 값 또는 기본값으로 바꾼다. */
+/** Replaces ${NAME:default} with the .env value or the default. */
 export function resolvePlaceholders(text: string, env: Record<string, string>): string {
   return text.replace(
     /\$\{([^:}]+)(?::([^}]*))?\}/g,
@@ -287,7 +287,7 @@ function loadCompose(root: string, useDocker: boolean): ComposeProject | null {
   if (!file) return null;
   let doc: unknown = null;
   if (useDocker) {
-    // docker compose config는 데몬 없이도 동작하며 extends/include/환경변수를 모두 반영해 준다.
+    // docker compose config works without the daemon and resolves extends, include, and variables.
     const res = spawnSync('docker', ['compose', '-f', file, 'config', '--format', 'json'], {
       cwd: root,
       encoding: 'utf8',
@@ -326,24 +326,24 @@ function loadCompose(root: string, useDocker: boolean): ComposeProject | null {
   return { file, services };
 }
 
-/** 감지 결과를 주석이 달린 devfleet.yaml 텍스트로 만든다. */
+/** Renders the detection result as a commented devfleet.yaml. */
 export function renderConfig(project: DetectedProject): string {
   const lines = [
-    '# devfleet 설정 파일 — `devfleet init`이 만든 초안입니다. 필요에 맞게 고쳐 쓰세요.',
-    '# 실행: devfleet up [서비스 또는 그룹 ...]',
+    '# devfleet config — a draft generated by `devfleet init`. Edit it to fit your setup.',
+    '# Run: devfleet up [service or group ...]',
     '',
   ];
   if (project.warnings.length) {
-    lines.push('# 확인 필요:', ...project.warnings.map((w) => `#   - ${w}`), '');
+    lines.push('# Please check:', ...project.warnings.map((w) => `#   - ${w}`), '');
   }
-  if (project.envFile) lines.push('# 모든 서비스에 넣을 환경변수 파일', `env_file: ${scalar(project.envFile)}`, '');
+  if (project.envFile) lines.push('# Environment file injected into every service', `env_file: ${scalar(project.envFile)}`, '');
   if (project.composeFile && project.infra.length) {
     lines.push(
-      '# 앱보다 먼저 Docker Compose로 띄울 인프라 (DB, 캐시, 메시지 브로커 등)',
+      '# Infrastructure started with Docker Compose before the apps (DB, cache, message broker, ...)',
       'infra:',
       `  compose_file: ${scalar(project.composeFile)}`,
       `  services: [${project.infra.map(scalar).join(', ')}]`,
-      '  # stop_on_exit: true   # devfleet을 끌 때 인프라도 함께 정지',
+      '  # stop_on_exit: true   # also stop the infra when devfleet exits',
       '',
     );
   }
@@ -352,18 +352,18 @@ export function renderConfig(project: DetectedProject): string {
   const ordered = waves(byName, project.apps.map((a) => a.name)).flat();
   for (const name of ordered) {
     const app = byName[name]!;
-    if (app.roles.length) lines.push(`  # ${app.roles.join(', ')} 서버`);
+    if (app.roles.length) lines.push(`  # ${app.roles.join(', ')} server`);
     lines.push(`  ${scalar(name)}:`);
     lines.push(`    dir: ${scalar(path.relative(project.root, app.runDir) || '.')}`);
     lines.push(`    cmd: ${scalar(app.cmd)}`);
     lines.push(`    port: ${app.port}`);
     if (app.dependsOn.length) lines.push(`    depends_on: [${app.dependsOn.map(scalar).join(', ')}]`);
-    lines.push(app.health ? `    health: ${scalar(app.health)}` : '    # health: 미지정 시 포트가 열리면 준비된 것으로 봅니다');
+    lines.push(app.health ? `    health: ${scalar(app.health)}` : '    # health: when omitted, the service is ready once the port accepts connections');
     lines.push('');
   }
-  if (!project.apps.length) lines.push('  # 찾은 Spring Boot 앱이 없습니다. 직접 추가하세요.', '');
+  if (!project.apps.length) lines.push('  # No Spring Boot apps were found. Add your services here.', '');
   lines.push(
-    '# 자주 함께 띄우는 서비스를 묶어 두면 `devfleet up core`처럼 쓸 수 있습니다.',
+    '# Group services you often start together, then run `devfleet up core`.',
     '# groups:',
     `#   core: [${ordered.slice(0, 2).join(', ')}]`,
   );

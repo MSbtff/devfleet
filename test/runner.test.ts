@@ -57,14 +57,14 @@ test('의존성 순서대로 띄우고, 준비를 기다리고, 역순으로 종
     ],
   );
   const log = output();
-  assert.ok(log.indexOf('a 준비 완료') < log.indexOf('b 시작'), 'b는 a가 준비된 뒤 시작해야 한다');
-  assert.ok(log.indexOf('b 준비 완료') < log.indexOf('c 시작'));
+  assert.ok(log.indexOf('a ready in') < log.indexOf('b starting'), 'b는 a가 준비된 뒤 시작해야 한다');
+  assert.ok(log.indexOf('b ready in') < log.indexOf('c starting'));
   assert.match(log, /a +│ starting on \d+ FAKE_VAR=global/);
   assert.match(log, /c +│ starting on \d+ FAKE_VAR=from-env-file/);
 
   await fleet.stop();
   const stopLog = output().slice(log.length);
-  assert.ok(stopLog.indexOf('c 종료 중') < stopLog.indexOf('a 종료 중'), '역순으로 종료해야 한다');
+  assert.ok(stopLog.indexOf('c stopping') < stopLog.indexOf('a stopping'), '역순으로 종료해야 한다');
   for (const port of [pa, pb, pc]) assert.equal(await isPortOpen(port), false);
   assert.match(fs.readFileSync(path.join(config.logDir, 'a.log'), 'utf8'), /listening/);
 });
@@ -81,9 +81,9 @@ test('시작 중 죽은 서비스는 실패로, 그 의존 서비스는 건너�
     rows.map((r) => r.status),
     ['failed', 'skipped'],
   );
-  assert.match(output(), /준비되기 전에 종료됐습니다 \(code 3\)/);
+  assert.match(output(), /exited before becoming ready \(code 3\)/);
   assert.match(output(), /boom: fatal startup error/, 'quiet 모드여도 실패한 서비스의 로그는 보여야 한다');
-  assert.doesNotMatch(output(), /b 시작/);
+  assert.doesNotMatch(output(), /b starting/);
   await fleet.stop();
 });
 
@@ -93,7 +93,7 @@ test('Gradle 데몬처럼 프로세스 그룹 밖에 남은 앱도 포트 기준
   const fleet = startFleet(config, [], { out, color: false });
   assert.equal((await fleet.ready)[0].status, 'ready');
   await fleet.stop();
-  assert.match(output(), /남은 PID \d+.* 정리/);
+  assert.match(output(), /stopping PID \d+.* left on port/);
   assert.equal(await isPortOpen(port), false);
 });
 
@@ -115,7 +115,7 @@ test('이미 떠 있는 정상 서비스는 재사용하고, 포트만 점유한
       rows.map((r) => r.status),
       ['external', 'failed'],
     );
-    assert.match(output(), new RegExp(`포트 ${badPort}를 다른 프로세스가 쓰고 있습니다 \\(PID \\d+`));
+    assert.match(output(), new RegExp(`port ${badPort} is in use by another process \\(PID \\d+`));
     await fleet.stop();
     assert.equal(await isPortOpen(okPort), true, '직접 띄우지 않은 프로세스는 종료하면 안 된다');
   } finally {

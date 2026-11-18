@@ -1,4 +1,4 @@
-/** 서비스가 준비됐는지 판단하는 방법 */
+/** How to tell that a service is ready */
 export type Health =
   | { type: 'http'; url: string; timeout: number; interval: number }
   | { type: 'tcp'; port: number; timeout: number; interval: number }
@@ -6,7 +6,7 @@ export type Health =
 
 export interface Service {
   name: string;
-  /** 명령을 실행할 절대 경로 */
+  /** Absolute working directory for the command */
   dir: string;
   cmd: string;
   env: Record<string, string>;
@@ -14,7 +14,7 @@ export interface Service {
   dependsOn: string[];
   port: number | null;
   health: Health;
-  /** Ctrl+C 후 정상 종료를 기다릴 초 */
+  /** Seconds to wait for a clean exit after Ctrl+C */
   stopTimeout: number;
 }
 
@@ -22,7 +22,7 @@ export interface Infra {
   composeFiles: string[];
   services: string[];
   stopOnExit: boolean;
-  /** 인프라가 준비될 때까지 기다릴 초 */
+  /** Seconds to wait for the infra to become ready */
   timeout: number;
 }
 
@@ -38,7 +38,7 @@ export interface Config {
   errors: string[];
 }
 
-/** 의존성 그래프 계산에 필요한 최소 정보 */
+/** The minimum needed to compute the dependency graph */
 export type DependencyMap = Record<string, { dependsOn: string[] }>;
 
 export type RawRecord = Record<string, unknown>;
