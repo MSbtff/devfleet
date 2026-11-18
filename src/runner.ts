@@ -102,6 +102,30 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
+/**
+ * 프로세스 그룹에 아직 살아 있는 프로세스가 있는지.
+ * dash 같은 셸은 `sh -c`로 받은 명령을 exec하지 않고 자식으로 띄우기 때문에,
+ * 셸이 SIGTERM으로 먼저 끝나도 실제 서비스는 같은 그룹에 남아 있을 수 있다.
+ */
+function groupAlive(child: ChildProcess): boolean {
+  if (IS_WIN || child.pid === undefined) return isRunning(child);
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function waitGroupExit(child: ChildProcess, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (groupAlive(child)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(100);
+  }
+  return true;
+}
+
 function killPid(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(pid, signal);
@@ -109,9 +133,6 @@ function killPid(pid: number, signal: NodeJS.Signals): void {
     /* 이미 종료됨 */
   }
 }
-
-const within = (promise: Promise<unknown>, ms: number): Promise<boolean> =>
-  Promise.race([promise.then(() => true), sleep(ms).then(() => false)]);
 
 async function waitPortClosed(port: number, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
@@ -347,19 +368,20 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     const st = state.get(name);
     if (!st?.child || !st.exited) return;
     const svc = service(name);
-    const { child, exited } = st;
-    if (isRunning(child)) {
+    const { child } = st;
+    // 셸이 아니라 그룹 전체가 끝났는지를 기준으로 신호를 올린다.
+    if (groupAlive(child)) {
       if (force) {
         killGroup(child, 'SIGKILL');
       } else {
         logger.info(name, '종료 중…');
         killGroup(child, 'SIGINT'); // 터미널 Ctrl+C와 같은 신호. Gradle은 이걸 받아야 bootRun을 정리한다.
-        if (!(await within(exited, svc.stopTimeout * 1000))) {
+        if (!(await waitGroupExit(child, svc.stopTimeout * 1000))) {
           killGroup(child, 'SIGTERM');
-          if (!(await within(exited, 5000))) killGroup(child, 'SIGKILL');
+          if (!(await waitGroupExit(child, 5000))) killGroup(child, 'SIGKILL');
         }
       }
-      await within(exited, 3000);
+      await waitGroupExit(child, 3000);
     }
     // Gradle 데몬이 띄운 JVM처럼 프로세스 그룹 밖에 남아 포트를 잡고 있는 자식을 정리한다.
     // 시작 전에 포트가 비어 있는 것을 확인했으므로 지금 포트를 잡은 프로세스는 이 서비스가 띄운 것이다.
