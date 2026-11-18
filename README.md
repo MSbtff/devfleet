@@ -1,108 +1,117 @@
 # devfleet
 
-로컬에서 마이크로서비스 여러 개를 **의존성 순서대로** 띄우고, **헬스체크가 통과할 때까지 기다리고**, 로그를 **한 화면에 모아** 보는 CLI입니다.
+[![CI](https://github.com/MSbtff/devfleet/actions/workflows/ci.yml/badge.svg)](https://github.com/MSbtff/devfleet/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Spring Boot MSA를 로컬에서 개발하면 보통 이렇게 됩니다.
+A CLI that starts many microservices locally **in dependency order**, **waits until each one is healthy**, and **collects all logs in one place**.
 
-- 터미널 9개를 열고 `set -a; source .env` 후 `./gradlew bootRun`을 하나씩 실행
-- Eureka가 뜨기 전에 다른 서비스를 띄워서 등록 오류 로그가 쌓임
-- Ctrl+C를 했는데 JVM이 남아 다음 실행 때 `Port 7071 was already in use`
-- 어느 서비스 로그인지 몰라 터미널을 오가며 찾음
+Running a Spring Boot microservice project locally usually looks like this:
 
-devfleet은 이 과정을 명령 하나로 줄입니다.
+- Open nine terminals, run `set -a; source .env`, then `./gradlew bootRun` in each one
+- Services start before Eureka is up and fill the logs with registration errors
+- You hit Ctrl+C, but a JVM survives, and the next run fails with `Port 7071 was already in use`
+- You jump between terminals trying to find which service printed what
+
+devfleet turns all of that into one command.
 
 ```bash
-devfleet init        # 프로젝트를 분석해 devfleet.yaml 생성
-devfleet up          # 인프라(Docker) → Eureka → 업무 서비스 → Gateway 순서로 실행
+devfleet init        # analyze the project and generate devfleet.yaml
+devfleet up          # infra (Docker) → Eureka → business services → Gateway
 ```
 
-출력 예시:
+Output from a real 9-service project (all services ready in about 41 seconds):
 
 ```
-devfleet      │ ✔ infra 준비 완료
-devfleet      │ eureka-server 시작: ./gradlew bootRun  (eurekaServer)
-devfleet      │ ✔ eureka-server 준비 완료 7.1s · http://127.0.0.1:8761
-devfleet      │ account-service 시작: ./gradlew bootRun  (AccountService)
-devfleet      │ menus-service 시작: ./gradlew bootRun  (MenusService)
-account-service │ Started AccountServiceApplication in 6.2 seconds
+devfleet              │ ✔ infra 준비 완료 0.1s
+devfleet              │ ✔ eureka-server 준비 완료 6.1s · http://127.0.0.1:8761
+devfleet              │ account-service 시작: ./gradlew bootRun  (AccountService)
+devfleet              │ menus-service 시작: ./gradlew bootRun  (MenusService)
 ...
-devfleet      │ 서비스             상태    포트  준비   PID
-devfleet      │ eureka-server      ✔ 준비  8761  7.1s   33178
-devfleet      │ account-service    ✔ 준비  7071  12.4s  33190
+devfleet              │ ✔ gateway-server 준비 완료 5.1s · http://127.0.0.1:7070
+devfleet              │
+devfleet              │ 서비스                 상태    포트  준비   PID
+devfleet              │ eureka-server          ✔ 준비  8761  6.1s   14719
+devfleet              │ account-service        ✔ 준비  7071  17.3s  14807
+devfleet              │ menus-service          ✔ 준비  7072  13.1s  14810
+devfleet              │ disposals-service      ✔ 준비  7077  6.1s   15066
+devfleet              │ gateway-server         ✔ 준비  7070  5.1s   15296
 ```
 
-## 특징
+> CLI messages are currently in Korean. English output is on the [roadmap](#roadmap).
 
-- **`init` 자동 분석**: Spring Boot 앱(Gradle·Maven, 단일·멀티 모듈)을 찾아 포트, Actuator 헬스 주소, 실행 명령을 채웁니다.
-  `application.yml`의 `${PORT:7071}` 같은 플레이스홀더는 `.env` 값으로 해석합니다.
-  `compose.yaml`이 있으면 `depends_on`에서 서비스 간 순서와 필요한 인프라(DB, Redis, Kafka 등)를 가져옵니다.
-- **Spring Cloud 구성 인식**: Config Server, Eureka, Consul, Nacos를 쓰는 앱은 해당 서버 뒤에 시작하도록 의존성을 채웁니다.
-  서버가 같은 프로젝트의 앱이면 그 앱에, 외부 제품이면 `compose.yaml`의 서비스를 찾아 infra에 넣고, 못 찾으면 경고합니다.
-  Config Server가 Eureka에 등록하고 Eureka가 설정을 Config Server에서 받는 구성처럼 서로 쓰는 경우에도 순환 없이 Config → Eureka 순서로 정리합니다.
-- **의존성 순서 + 헬스 대기**: 의존 서비스가 *준비된 뒤에* 시작합니다. 같은 단계의 서비스는 동시에 띄웁니다.
-- **실패 전파**: 시작 중 죽은 서비스는 마지막 로그를 보여 주고, 그 서비스에 의존하는 서비스는 건너뜁니다.
-- **포트 충돌 안내**: 포트를 누가 쓰는지 PID와 함께 알려 줍니다. 이미 떠 있는 정상 서비스(예: IDE에서 디버깅 중)는 그대로 재사용합니다.
-- **확실한 종료**: Ctrl+C 한 번이면 역순(Gateway → 업무 서비스 → Eureka)으로 정리합니다. Gradle 데몬이 띄운 JVM처럼 프로세스 그룹 밖에 남은 프로세스도 포트 기준으로 찾아 종료합니다.
-- **로그 모음**: 서비스별 색상 접두어로 한 화면에 보여 주고 `.devfleet/logs/<서비스>.log`에도 저장합니다.
+## Features
 
-## 설치
+- **Project analysis with `init`**: finds Spring Boot apps (Gradle or Maven, single or multi-module) and fills in the port, Actuator health URL, and run command.
+  Placeholders such as `${PORT:7071}` in `application.yml` are resolved against `.env`.
+  If there is a `compose.yaml`, service order and required infrastructure (DB, Redis, Kafka, …) are taken from `depends_on`.
+- **Spring Cloud awareness**: apps that use Config Server, Eureka, Consul, or Nacos are started after that server.
+  If the server is an app in the same project, devfleet depends on it; if it is an external product, devfleet finds it in `compose.yaml` and adds it to infra, or warns when it cannot.
+  Mutual setups — Config Server registers with Eureka while Eureka reads its config from Config Server — are ordered Config → Eureka without creating a cycle.
+- **Dependency order + health waiting**: a service starts only *after* its dependencies are ready. Services at the same level start in parallel.
+- **Infra readiness that understands init containers**: Compose services count as ready when they are running and healthy, or when a one-shot init container exits with code 0.
+- **Failure propagation**: when a service dies during startup, devfleet shows its last log lines and skips every service that depends on it.
+- **Port conflict reporting**: tells you which PID holds a port. A healthy service that is already running (for example, one you are debugging in your IDE) is reused as-is.
+- **Clean shutdown**: one Ctrl+C stops everything in reverse order (Gateway → business services → Eureka). Processes outside the process group, such as JVMs forked by the Gradle daemon, are found by port and stopped too.
+- **Unified logs**: every line is prefixed with a colored service name, and each service also gets `.devfleet/logs/<service>.log`.
 
-Node.js 20 이상이 필요합니다.
+## Installation
+
+Requires Node.js 20 or later.
 
 ```bash
 git clone https://github.com/MSbtff/devfleet.git && cd devfleet
-npm install         # 설치하면서 TypeScript를 dist/로 빌드합니다
-npm link            # 어디서나 devfleet 명령 사용
+npm install         # also builds the TypeScript sources into dist/
+npm link            # makes the devfleet command available everywhere
 ```
 
-## 사용법
+## Usage
 
-| 명령 | 설명 |
+| Command | Description |
 |---|---|
-| `devfleet init` | 현재 폴더를 분석해 `devfleet.yaml` 생성 (`--print`: 파일 대신 화면 출력, `--force`: 덮어쓰기) |
-| `devfleet up [이름...]` | 서비스나 그룹을 의존성과 함께 실행. 이름이 없으면 전체 |
-| `devfleet status` | 각 서비스의 포트·헬스 상태와 점유 프로세스 |
-| `devfleet logs <이름> [-f]` | 로그 파일 보기 |
-| `devfleet down` | infra 컨테이너 정지 (데이터 볼륨은 유지) |
+| `devfleet init` | Analyze the current folder and create `devfleet.yaml` (`--print`: print instead of writing, `--force`: overwrite) |
+| `devfleet up [name...]` | Start services or groups together with their dependencies. Starts everything when no name is given |
+| `devfleet status` | Port and health status of each service, plus the process holding the port |
+| `devfleet logs <name> [-f]` | Show a service's log file |
+| `devfleet down` | Stop the infra containers (data volumes are kept) |
 
-`up` 옵션
+Options for `up`
 
-| 옵션 | 설명 |
+| Option | Description |
 |---|---|
-| `--no-deps` | 의존 서비스는 띄우지 않고 이미 실행 중인지만 확인 |
-| `--no-infra` | Docker Compose 인프라를 건드리지 않음 |
-| `--down` | 종료할 때 인프라도 정지 |
-| `--only a,b` | 화면에는 지정한 서비스 로그만 표시 (파일에는 전부 기록) |
-| `-q`, `--quiet` | 화면에는 상태 메시지만 표시 |
-| `--dry-run` | 실행 계획만 출력 |
+| `--no-deps` | Don't start dependencies; only check that they are already running |
+| `--no-infra` | Leave Docker Compose infrastructure alone |
+| `--down` | Stop the infra containers on exit as well |
+| `--only a,b` | Show only these services' logs on screen (all logs are still written to files) |
+| `-q`, `--quiet` | Show only status messages on screen |
+| `--dry-run` | Print the start plan without running anything |
 
-자주 쓰는 패턴
+Common patterns
 
 ```bash
-devfleet up account-service            # Eureka + Account만 (의존성 자동 포함)
-devfleet up gateway-server -q          # 전체를 띄우되 화면은 조용히
-devfleet up --only account-service     # 다 띄우고 Account 로그만 보기
-devfleet up account-service --no-deps  # Eureka는 IDE에서 디버깅 중일 때
+devfleet up account-service            # just Eureka + Account (dependencies included automatically)
+devfleet up gateway-server -q          # start everything, keep the screen quiet
+devfleet up --only account-service     # start everything, watch only Account's logs
+devfleet up account-service --no-deps  # Eureka is already running in your IDE debugger
 ```
 
-## 설정 파일 (`devfleet.yaml`)
+## Configuration (`devfleet.yaml`)
 
 ```yaml
-env_file: .env                 # 모든 서비스에 주입할 환경변수 파일
-env:                           # 추가 환경변수 (env_file보다 우선)
+env_file: .env                 # environment variables injected into every service
+env:                           # extra variables (take precedence over env_file)
   SPRING_PROFILES_ACTIVE: local
 
-infra:                         # 앱보다 먼저 docker compose up -d 로 띄울 서비스
-  compose_file: compose.yaml   # 여러 개면 compose_files: [a.yaml, b.yaml]
+infra:                         # services started with `docker compose up -d` before the apps
+  compose_file: compose.yaml   # for several files: compose_files: [a.yaml, b.yaml]
   services: [mariadb, redis, kafka]
   stop_on_exit: false
-  timeout: 180                 # 컨테이너가 healthy(또는 초기화 컨테이너가 exit 0)가 될 때까지 기다릴 초
+  timeout: 180                 # seconds to wait until containers are healthy (or init containers exit 0)
 
 services:
   eureka-server:
-    dir: eurekaServer          # 실행 폴더 (설정 파일 기준 상대 경로)
-    cmd: ./gradlew bootRun     # 셸 명령
-    port: 8761                 # 포트 충돌 검사·종료 정리에 사용
+    dir: eurekaServer          # working directory, relative to this file
+    cmd: ./gradlew bootRun     # shell command
+    port: 8761                 # used for port-conflict checks and shutdown cleanup
     health: http://127.0.0.1:8761/actuator/health
 
   account-service:
@@ -110,75 +119,75 @@ services:
     cmd: ./gradlew bootRun
     port: 7071
     depends_on: [eureka-server]
-    env_file: AccountService/.env.local   # 서비스별 추가 env (선택)
+    env_file: AccountService/.env.local   # optional per-service env file
     health:
       http: http://127.0.0.1:7071/actuator/health
-      timeout: 300             # 초. 기본 180
-    stop_timeout: 20           # Ctrl+C 후 기다릴 초. 기본 15
+      timeout: 300             # seconds, default 180
+    stop_timeout: 20           # seconds to wait after Ctrl+C, default 15
 
 groups:
   core: [eureka-server, account-service]
 ```
 
-`health`를 생략하면 `port`가 열리는 시점을 준비 완료로 봅니다. `health: none`이면 실행 직후 준비로 봅니다.
-HTTP 헬스는 2xx·3xx 응답을 정상으로 봅니다. Spring Actuator는 DB 등이 DOWN이면 503을 돌려주므로, 실제로 쓸 수 있을 때까지 기다리게 됩니다.
+When `health` is omitted, the service is ready as soon as `port` accepts connections. With `health: none` it is ready right after it starts.
+HTTP health checks treat 2xx and 3xx responses as healthy. Spring Actuator returns 503 while a dependency such as the DB is DOWN, so devfleet waits until the service is actually usable.
 
-## 예제
+## Example
 
-Spring 없이 바로 동작을 확인할 수 있습니다.
+Try it without Spring:
 
 ```bash
 cd examples/demo
 node ../../dist/cli.js up
 ```
 
-## 개발
+## Development
 
-TypeScript로 작성했습니다. 테스트와 예제의 가짜 서비스는 Node의 TypeScript 실행 기능(type stripping)으로
-빌드 없이 바로 돌아가므로 개발할 때는 **Node.js 22.18 이상**이 필요합니다.
+devfleet is written in TypeScript. Tests and the demo's fake services run directly through Node's type stripping, without a build step, so development requires **Node.js 22.18 or later**.
 
 ```bash
-npm run typecheck   # 타입 검사 (src + test)
-npm test            # node --test로 .ts 테스트 실행
-npm run build       # dist/ 생성
+npm run typecheck   # type-check src and test
+npm test            # run the .ts tests with node --test
+npm run build       # produce dist/
 ```
 
-| 파일 | 역할 |
+| File | Responsibility |
 |---|---|
-| `src/cli.ts` | 명령 파싱과 출력 |
-| `src/config.ts` | `devfleet.yaml`·`.env` 읽기와 검증 |
-| `src/graph.ts` | 대상 서비스 계산, 순환 검사, 실행 단계 나누기 |
-| `src/runner.ts` | 프로세스 실행·헬스 대기·종료 정리 |
-| `src/init.ts` | Spring Boot·Compose 프로젝트 분석 |
-| `src/detectors.ts` | Spring Cloud 서버 감지 규칙 (Config, Eureka, Consul, Nacos) |
-| `src/health.ts`, `src/ports.ts` | 헬스체크, 포트 점유 확인 |
-| `src/logger.ts` | 색상 접두어 로그와 로그 파일 |
+| `src/cli.ts` | Argument parsing and output |
+| `src/config.ts` | Reading and validating `devfleet.yaml` and `.env` |
+| `src/graph.ts` | Target resolution, cycle detection, start waves |
+| `src/runner.ts` | Process launch, health waiting, shutdown cleanup |
+| `src/infra.ts` | Docker Compose infra startup and readiness |
+| `src/init.ts` | Spring Boot and Compose project analysis |
+| `src/detectors.ts` | Spring Cloud server detection rules (Config, Eureka, Consul, Nacos) |
+| `src/health.ts`, `src/ports.ts` | Health checks and port ownership |
+| `src/logger.ts` | Colored, prefixed logs and log files |
 
-### 감지 규칙 추가하기
+### Adding a detection rule
 
-`src/detectors.ts`의 `RULES`에 객체 하나를 추가하면 `init`이 새 구성 요소를 인식합니다.
+Add one object to `RULES` in `src/detectors.ts` and `init` will recognize a new component.
 
 ```ts
 {
   id: 'zookeeper',
   label: 'Zookeeper',
-  infraImage: /zookeeper/,                                   // compose 서비스 이름·이미지로 서버 찾기
+  infraImage: /zookeeper/,                                   // find the server by compose service name or image
   uses: (app) => /spring-cloud-starter-zookeeper/.test(app.buildText),
 }
 ```
 
-서버가 같은 프로젝트의 Spring Boot 앱이라면 `serves: (app) => ...`로 서버 앱을 알아보게 합니다.
-배열 순서가 우선순위이며, 앞선 규칙과 순환이 생기는 의존성은 추가하지 않습니다.
+If the server is a Spring Boot app in the same project, add `serves: (app) => ...` so the server app can be recognized.
+Rules are applied in array order, and a dependency that would create a cycle with an earlier rule is not added.
 
-## 로드맵
+## Roadmap
 
-- [ ] Node·Python·Go 서비스 자동 감지 (`package.json`, `pyproject.toml`, `go.mod`)
-- [ ] 일부는 Compose 컨테이너로, 수정 중인 서비스만 로컬로 띄우는 혼합 모드
-- [ ] 파일 변경 시 해당 서비스만 재시작 (`--watch`)
-- [ ] 실행 중인 서비스를 다른 터미널에서 재시작하는 `devfleet restart <이름>`
-- [ ] Windows 지원 검증
-- [ ] 영어 메시지
+- [ ] English CLI messages
+- [ ] Detect Node, Python, and Go services (`package.json`, `pyproject.toml`, `go.mod`)
+- [ ] `devfleet restart <name>` to restart one running service from another terminal
+- [ ] Restart a service when its files change (`--watch`)
+- [ ] Hybrid mode: run most services as Compose containers and only the ones you are editing locally
+- [ ] Verify Windows support
 
-## 라이선스
+## License
 
 MIT
