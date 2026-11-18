@@ -12,7 +12,16 @@ import type { Config } from './types.ts';
 const IS_WIN = process.platform === 'win32';
 const INFRA = 'infra';
 
-export type Status = 'waiting' | 'starting' | 'ready' | 'external' | 'failed' | 'skipped' | 'crashed' | 'stopped';
+export type Status =
+  | 'waiting'
+  | 'starting'
+  | 'ready'
+  | 'external'
+  | 'failed'
+  | 'skipped'
+  | 'crashed'
+  | 'stopping'
+  | 'stopped';
 
 interface ExitInfo {
   code: number | null;
@@ -55,14 +64,28 @@ export interface SummaryRow {
   logFile: string | null;
 }
 
+export interface ActionResult {
+  ok: boolean;
+  error?: string;
+}
+
 export interface Fleet {
   plan: Plan;
   state: Map<string, ServiceState>;
   logger: Logger;
   /** Resolves with a summary once every service has finished trying to start (success or failure). */
   ready: Promise<SummaryRow[]>;
-  /** Resolves once every process devfleet started has exited. */
-  allExited: Promise<unknown>;
+  /**
+   * Resolves once no process devfleet started is running any more.
+   * A service stopped on request (`devfleet stop`) keeps the fleet open so it can be restarted.
+   */
+  allExited: Promise<void>;
+  /** Current status of every service in this run. */
+  summarize(): SummaryRow[];
+  /** Stops the services (dependents first), then starts them again in dependency order. */
+  restart(names: readonly string[]): Promise<ActionResult>;
+  /** Stops the services, dependents first. Services that depend on them keep running. */
+  stopServices(names: readonly string[]): Promise<ActionResult>;
   stop(options?: { force?: boolean }): Promise<void>;
 }
 
@@ -179,6 +202,11 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   let stopPromise: Promise<void> | null = null;
   let infraStarted = false;
   let infraChild: ChildProcess | null = null;
+  let startupDone = false;
+  /** Services a restart or stop request is working on */
+  const busy = new Set<string>();
+  let resolveAllExited!: () => void;
+  const allExited = new Promise<void>((resolve) => (resolveAllExited = resolve));
 
   const set = (name: string, patch: Partial<ServiceState>) =>
     state.set(name, { status: 'waiting', ...state.get(name), ...patch });
@@ -305,15 +333,17 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       child.once('exit', (code, signal) => resolve({ code, signal }));
     });
     const startedAt = Date.now();
-    set(name, { status: 'starting', child, pid: child.pid, exited, startedAt });
+    set(name, { status: 'starting', child, pid: child.pid, exited, startedAt, readySeconds: undefined });
 
     void exited.then(({ code, signal }) => {
       if (stopping) return;
-      if (state.get(name)?.status === 'ready') {
+      // A restart replaces the child; only the current one can crash.
+      if (state.get(name)?.child === child && state.get(name)?.status === 'ready') {
         set(name, { status: 'crashed' });
         logger.error(name, `exited (${signal ?? `code ${code}`})`);
         logger.dumpTail(name);
       }
+      checkAllExited();
     });
 
     const result = await waitHealthy(svc.health, { signal: abort.signal, alive: () => isRunning(child) });
@@ -369,6 +399,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     if (!st?.child || !st.exited) return;
     const svc = service(name);
     const { child } = st;
+    set(name, { status: 'stopping' });
     // Escalate based on the whole process group, not just the shell.
     if (groupAlive(child)) {
       if (force) {
@@ -421,8 +452,94 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         logger.info(INFRA, 'leaving infra containers running (stop them with: devfleet down)');
       }
       await logger.close();
+      resolveAllExited();
     })();
     return stopPromise;
+  }
+
+  function checkAllExited(): void {
+    if (!startupDone || busy.size) return;
+    const states = [...state.values()];
+    if (states.some((s) => s.child && isRunning(s.child))) return;
+    if (states.some((s) => s.status === 'stopped')) return;
+    resolveAllExited();
+  }
+
+  /** Why the services can't be restarted or stopped right now, or null. */
+  function refuse(names: readonly string[]): string | null {
+    if (stopping) return 'devfleet is shutting down';
+    if (!names.length) return 'no services given';
+    const unknown = names.filter((n) => !config.services[n]);
+    if (unknown.length) return `Unknown service: ${unknown.join(', ')}`;
+    const outside = names.filter((n) => !plan.targets.includes(n));
+    if (outside.length) {
+      return `not started by this devfleet up: ${outside.join(', ')} (it only manages ${plan.targets.join(', ')})`;
+    }
+    if (!startupDone) return 'still starting up; try again once every service has finished starting';
+    const inUse = names.filter((n) => busy.has(n));
+    if (inUse.length) return `already being restarted or stopped: ${inUse.join(', ')}`;
+    return null;
+  }
+
+  /** The given services grouped into this run's start waves, in start order. */
+  function wavesOf(names: readonly string[]): string[][] {
+    return plan.waves.map((wave) => wave.filter((n) => names.includes(n))).filter((wave) => wave.length);
+  }
+
+  async function withBusy(names: readonly string[], action: () => Promise<ActionResult>): Promise<ActionResult> {
+    const error = refuse(names);
+    if (error) return { ok: false, error };
+    for (const name of names) busy.add(name);
+    try {
+      return await action();
+    } finally {
+      for (const name of names) busy.delete(name);
+      checkAllExited();
+    }
+  }
+
+  function stopServices(names: readonly string[]): Promise<ActionResult> {
+    const unique = [...new Set(names)];
+    return withBusy(unique, async () => {
+      for (const wave of wavesOf(unique).reverse()) {
+        await Promise.all(wave.map((name) => stopOne(name, false)));
+      }
+      return { ok: true };
+    });
+  }
+
+  function restart(names: readonly string[]): Promise<ActionResult> {
+    const unique = [...new Set(names)];
+    return withBusy(unique, async () => {
+      const groups = wavesOf(unique);
+      for (const wave of [...groups].reverse()) {
+        await Promise.all(wave.map((name) => stopOne(name, false)));
+      }
+      const failed: string[] = [];
+      for (const wave of groups) {
+        await Promise.all(
+          wave.map(async (name) => {
+            if (stopping) {
+              failed.push(name);
+              return;
+            }
+            const notReady = service(name).dependsOn.filter((dep) => {
+              const status = state.get(dep)?.status;
+              return status !== 'ready' && status !== 'external';
+            });
+            if (notReady.length) {
+              set(name, { status: 'skipped' });
+              logger.warn(name, `not started: dependencies are not ready (${notReady.join(', ')})`);
+              failed.push(name);
+              return;
+            }
+            if (!(await launch(name))) failed.push(name);
+          }),
+        );
+      }
+      if (stopping) return { ok: false, error: 'devfleet is shutting down' };
+      return failed.length ? { ok: false, error: `not ready: ${failed.join(', ')}` } : { ok: true };
+    });
   }
 
   function summarize(): SummaryRow[] {
@@ -445,14 +562,12 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     } else {
       for (const name of plan.targets) set(name, { status: 'skipped' });
     }
+    startupDone = true;
+    checkAllExited();
     return summarize();
   })();
 
-  const allExited = ready.then(() =>
-    Promise.all([...state.values()].flatMap((s) => (s.exited ? [s.exited] : []))),
-  );
-
-  return { plan, state, logger, ready, allExited, stop };
+  return { plan, state, logger, ready, allExited, summarize, restart, stopServices, stop };
 }
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -463,8 +578,13 @@ const STATUS_LABEL: Record<Status, string> = {
   failed: '✖ failed',
   skipped: '– skipped',
   crashed: '✖ crashed',
+  stopping: '… stopping',
   stopped: '■ stopped',
 };
+
+export function statusLabel(status: Status): string {
+  return STATUS_LABEL[status];
+}
 
 export function formatSummary(rows: readonly SummaryRow[]): string {
   const header = ['SERVICE', 'STATUS', 'PORT', 'READY', 'PID'];

@@ -4,7 +4,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { findConfig, loadConfig, CONFIG_NAMES } from './config.ts';
-import { startFleet, planUp, formatSummary, formatTable, displayPath, type Plan } from './runner.ts';
+import { startFleet, planUp, formatSummary, formatTable, displayPath, statusLabel, type Plan } from './runner.ts';
+import { controlPath, serveControl, sendControl } from './control.ts';
+import { resolveTargets } from './graph.ts';
 import { composeArgs } from './infra.ts';
 import { detectProject, renderConfig } from './init.ts';
 import { isPortOpen, findListeners, describeListeners } from './ports.ts';
@@ -21,8 +23,10 @@ Usage
   devfleet init                  analyze the project and create a devfleet.yaml draft
   devfleet up [name...]          start services (or groups) in dependency order
   devfleet status                show each service's port and health
+  devfleet restart <name...>     restart services in the running \`devfleet up\`
+  devfleet stop <name...>        stop services in the running \`devfleet up\`
   devfleet logs <name> [-f]      show a service's log file
-  devfleet down                  stop the infra containers
+  devfleet down                  stop the running \`devfleet up\` and the infra containers
 
 Options for up
   --no-deps        don't start dependencies; only check that they are running
@@ -122,6 +126,7 @@ async function cmdUp(opts: Args): Promise<void> {
   }
   const { logger } = fleet;
   let signals = 0;
+  let remoteShutdown = false;
   const shutdown = async (code: number) => {
     await fleet.stop();
     process.exit(code);
@@ -138,8 +143,33 @@ async function cmdUp(opts: Args): Promise<void> {
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
 
+  // Lets `devfleet status`, `restart`, `stop`, and `down` in other terminals reach this run.
+  const control = await serveControl(controlPath(config), async (request, reply) => {
+    if (request.cmd === 'status') {
+      return reply.done({ ok: true, pid: process.pid, rows: fleet.summarize() });
+    }
+    if (request.cmd === 'shutdown') {
+      if (!signals && !remoteShutdown) logger.system('Shutting down (requested by devfleet down)…');
+      remoteShutdown = true;
+      const unsubscribe = logger.subscribe(reply.log);
+      await fleet.stop();
+      unsubscribe();
+      await reply.done({ ok: true, pid: process.pid });
+      process.exit(0);
+    }
+    logger.system(`${request.cmd} requested from another terminal: ${request.names.join(', ')}`);
+    const unsubscribe = logger.subscribe(reply.log);
+    const result = request.cmd === 'restart' ? await fleet.restart(request.names) : await fleet.stopServices(request.names);
+    unsubscribe();
+    if (result.error) logger.system(`${request.cmd} failed: ${result.error}`);
+    return reply.done({ ...result, pid: process.pid, rows: fleet.summarize() });
+  });
+  if (!control) {
+    logger.system('Another devfleet up is already running for this config; `devfleet restart` and `stop` will talk to that one.');
+  }
+
   const rows = await fleet.ready;
-  if (signals) return;
+  if (signals || remoteShutdown) return;
   logger.system('');
   for (const line of formatSummary(rows).split('\n')) logger.system(line);
   const running = rows.filter((r) => r.pid);
@@ -152,13 +182,15 @@ async function cmdUp(opts: Args): Promise<void> {
   logger.system(`Logs: ${path.relative(process.cwd(), config.logDir) || '.'}/<service>.log · Ctrl+C stops everything`);
 
   await fleet.allExited;
-  if (signals) return;
+  if (signals || remoteShutdown) return;
   logger.system('Every service started by devfleet has exited.');
   return shutdown(1);
 }
 
 async function cmdStatus(opts: Args): Promise<void> {
   const config = requireConfig(opts);
+  const live = await sendControl(controlPath(config), { cmd: 'status' }).catch(() => null);
+  const managed = new Map((live?.rows ?? []).map((r) => [r.name, r]));
   const rows = await Promise.all(
     Object.values(config.services).map(async (svc): Promise<string[]> => {
       if (!svc.port) {
@@ -172,7 +204,36 @@ async function cmdStatus(opts: Args): Promise<void> {
       return [svc.name, port, healthy ? '● healthy' : '◐ port open, health failing', who];
     }),
   );
-  console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'PROCESS'], ...rows]));
+  if (!live) {
+    console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'PROCESS'], ...rows]));
+    return;
+  }
+  // FLEET is what the running `devfleet up` knows: starting, crashed, stopped on request, ….
+  const withFleet = rows.map(([name = '', port = '', status = '', who = '']) => {
+    const row = managed.get(name);
+    return [name, port, status, row ? statusLabel(row.status) : '', who];
+  });
+  console.log(`devfleet up is running (PID ${live.pid})`);
+  console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'FLEET', 'PROCESS'], ...withFleet]));
+}
+
+/** Sends `restart` or `stop` to the running `devfleet up` and prints its progress. */
+async function cmdControl(opts: Args, cmd: 'restart' | 'stop'): Promise<void> {
+  const config = requireConfig(opts);
+  if (!opts._.length) fail(`Name a service or group, e.g. devfleet ${cmd} account-service`);
+  let names: string[];
+  try {
+    names = resolveTargets(config, opts._, { withDeps: false });
+  } catch (err) {
+    fail((err as Error).message);
+  }
+  const result = await sendControl(controlPath(config), { cmd, names }, (line) => console.log(line));
+  if (!result) fail('No devfleet up is running for this project. Start one with `devfleet up`.');
+  if (result.rows) {
+    const affected = result.rows.filter((r) => names.includes(r.name));
+    if (affected.length) console.log(formatSummary(affected));
+  }
+  if (!result.ok) fail(result.error ?? `${cmd} failed`);
 }
 
 function cmdLogs(opts: Args): void {
@@ -186,9 +247,14 @@ function cmdLogs(opts: Args): void {
   spawn('tail', args, { stdio: 'inherit' }).on('exit', (code) => process.exit(code ?? 0));
 }
 
-function cmdDown(opts: Args): void {
+async function cmdDown(opts: Args): Promise<void> {
   const config = requireConfig(opts);
-  if (!config.infra?.services.length) fail('No infra is configured.');
+  const stopped = await sendControl(controlPath(config), { cmd: 'shutdown' }, (line) => console.log(line));
+  if (stopped) console.log(`Stopped the running devfleet up (PID ${stopped.pid}).`);
+  if (!config.infra?.services.length) {
+    if (stopped) return;
+    fail('No infra is configured.');
+  }
   spawn('docker', composeArgs(config.infra, 'stop'), { cwd: config.root, stdio: 'inherit' }).on('exit', (code) =>
     process.exit(code ?? 1),
   );
@@ -199,6 +265,8 @@ const COMMANDS: Record<string, (opts: Args) => void | Promise<void>> = {
   up: cmdUp,
   status: cmdStatus,
   ps: cmdStatus,
+  restart: (opts) => cmdControl(opts, 'restart'),
+  stop: (opts) => cmdControl(opts, 'stop'),
   logs: cmdLogs,
   down: cmdDown,
 };

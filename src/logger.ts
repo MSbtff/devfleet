@@ -28,6 +28,7 @@ export class Logger {
   private readonly colorOf: Map<string, number>;
   private readonly files = new Map<string, fs.WriteStream>();
   private readonly tails = new Map<string, string[]>();
+  private readonly listeners = new Set<(text: string) => void>();
 
   constructor({ out = process.stdout, color, names = [], logDir = null, quiet = false, only = null }: LoggerOptions = {}) {
     this.out = out;
@@ -93,6 +94,16 @@ export class Logger {
 
   system(text: string): void {
     this.out.write(`${this.paint(90, SYSTEM.padEnd(this.width))} │ ${text}\n`);
+    if (this.listeners.size) {
+      const plain = text.replace(/\x1b\[[0-9;]*m/g, '');
+      for (const listener of this.listeners) listener(plain);
+    }
+  }
+
+  /** Calls `listener` with every status message (without colors) until the returned function is called. */
+  subscribe(listener: (text: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   private tag(name: string): string {

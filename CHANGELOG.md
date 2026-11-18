@@ -3,6 +3,19 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `devfleet restart <name...>` and `devfleet stop <name...>`: restart or stop services and groups inside a running `devfleet up` from another terminal. Restarts stop dependents first and start in dependency order, and work on crashed, failed, or skipped services too.
+- A local control socket that `devfleet up` listens on, so other commands can reach it.
+
+### Changed
+
+- `devfleet status` shows a FLEET column with what the running `devfleet up` knows about each service.
+- `devfleet down` also stops a running `devfleet up` before stopping the infra containers, and no longer fails when no infra is configured but an `up` was stopped.
+- `devfleet up` no longer exits while a service stopped with `devfleet stop` could still be restarted.
+
 ## [0.1.0] - 2026-11-18
 
 First public release.
@@ -21,4 +34,5 @@ First public release.
 - English CLI messages, help text, and generated `devfleet.yaml` comments.
 - End-to-end tests for the CLI and the stop, crash, and health-timeout paths, run on Linux and macOS with Node 22 and 24, plus a Node 20 runtime check of the packed tarball.
 
+[Unreleased]: https://github.com/MSbtff/devfleet/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/MSbtff/devfleet/releases/tag/v0.1.0

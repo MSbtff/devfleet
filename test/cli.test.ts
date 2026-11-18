@@ -279,3 +279,59 @@ test('down: infra 설정이 없으면 exit 1', async () => {
   assert.equal(result.code, 1);
   assert.match(result.stderr, /No infra is configured/);
 });
+
+test('다른 터미널에서 restart → stop → status → down으로 실행 중인 up을 제어한다', async () => {
+  const [pa, pb] = await Promise.all([freePort(), freePort()]);
+  const root = project({
+    services: {
+      a: { cmd: fake(`--port=${pa}`), port: pa },
+      b: { cmd: fake(`--port=${pb}`), port: pb, depends_on: ['a'] },
+    },
+    groups: { all: ['a', 'b'] },
+  });
+  const up = start(['up'], root);
+  try {
+    await up.waitFor(/Ctrl\+C stops everything/);
+
+    const restart = await run(['restart', 'a'], root);
+    assert.equal(restart.code, 0, restart.stderr);
+    assert.match(restart.stdout, /a stopping…/);
+    assert.match(restart.stdout, /✔ a ready in/);
+    assert.match(restart.stdout, /a +✔ ready +\d+/);
+    assert.match(up.output(), /restart requested from another terminal: a/);
+
+    const stop = await run(['stop', 'b'], root);
+    assert.equal(stop.code, 0, stop.stderr);
+    assert.equal(await isPortOpen(pb), false);
+
+    const status = await run(['status'], root);
+    assert.match(status.stdout, /devfleet up is running \(PID \d+\)/);
+    assert.match(status.stdout, new RegExp(`a +${pa} +● healthy +✔ ready`));
+    assert.match(status.stdout, new RegExp(`b +${pb} +○ stopped +■ stopped`));
+
+    const group = await run(['restart', 'all'], root);
+    assert.equal(group.code, 0, group.stderr);
+    assert.equal(await isPortOpen(pb), true);
+
+    const unknown = await run(['restart', 'ghost'], root);
+    assert.equal(unknown.code, 1);
+    assert.match(unknown.stderr, /Unknown service or group: ghost/);
+    const noName = await run(['stop'], root);
+    assert.equal(noName.code, 1);
+    assert.match(noName.stderr, /Name a service or group/);
+
+    const down = await run(['down'], root);
+    assert.equal(down.code, 0, down.stderr);
+    assert.match(down.stdout, /Stopped the running devfleet up/);
+    assert.equal(await up.exited, 0);
+    assert.match(up.output(), /Shutting down \(requested by devfleet down\)/);
+  } finally {
+    up.child.kill('SIGKILL');
+  }
+  assert.equal(await isPortOpen(pa), false);
+  assert.equal(await isPortOpen(pb), false);
+
+  const after = await run(['restart', 'a'], root);
+  assert.equal(after.code, 1);
+  assert.match(after.stderr, /No devfleet up is running for this project/);
+});
