@@ -10,6 +10,7 @@ import { detectProject, renderConfig } from './init.ts';
 import { isPortOpen, findListeners, describeListeners } from './ports.ts';
 import { checkOnce, describeHealth } from './health.ts';
 import type { Config } from './types.ts';
+import { parseArgs, type Args } from './args.ts';
 
 // src/cli.ts와 dist/cli.js 모두 한 단계 위에 package.json이 있다.
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
@@ -35,44 +36,6 @@ up 옵션
   -c, --config <파일>   설정 파일 경로 (기본: 현재 폴더부터 위로 ${CONFIG_NAMES[0]} 탐색)
   -h, --help / -v, --version
 `;
-
-interface Args {
-  _: string[];
-  [flag: string]: string | boolean | string[] | undefined;
-}
-
-const VALUE_FLAGS = new Set(['config', 'only', 'n']);
-const ALIASES: Record<string, string> = { c: 'config', q: 'quiet', f: 'follow', h: 'help', v: 'version' };
-
-export function parseArgs(argv: readonly string[]): Args {
-  const opts: Args = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === '--') {
-      opts._.push(...argv.slice(i + 1));
-      break;
-    }
-    const long = arg.match(/^--([^=]+)(?:=(.*))?$/);
-    const short = arg.match(/^-([A-Za-z])$/);
-    if (!long && !short) {
-      opts._.push(arg);
-      continue;
-    }
-    const key = long ? long[1]! : (ALIASES[short![1]!] ?? short![1]!);
-    if (key.startsWith('no-')) {
-      opts[key.slice(3)] = false;
-      continue;
-    }
-    if (VALUE_FLAGS.has(key)) {
-      const value = long?.[2] ?? argv[++i];
-      if (value == null) fail(`--${key}에 값이 필요합니다.`);
-      opts[key] = value;
-    } else {
-      opts[key] = long?.[2] ?? true;
-    }
-  }
-  return opts;
-}
 
 function fail(message: string): never {
   process.stderr.write(`devfleet: ${message}\n`);
@@ -240,7 +203,12 @@ const COMMANDS: Record<string, (opts: Args) => void | Promise<void>> = {
   down: cmdDown,
 };
 
-const opts = parseArgs(process.argv.slice(2));
+let opts: Args;
+try {
+  opts = parseArgs(process.argv.slice(2));
+} catch (err) {
+  fail((err as Error).message);
+}
 const command = opts._.shift();
 if (opts.version) {
   console.log(version);

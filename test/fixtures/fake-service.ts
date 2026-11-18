@@ -1,19 +1,30 @@
-// 테스트용 가짜 서비스. 인자: --port=N --delay=ms --crash=ms --orphan --status=503
+// 테스트용 가짜 서비스.
+// 인자: --port=N --delay=ms --crash=ms --crash-after-ready=ms --orphan --status=503
+//       --ignore=SIGINT,SIGTERM --print-env=A,B
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const args = Object.fromEntries(
+const args: Record<string, string> = Object.fromEntries(
   process.argv.slice(2).map((a) => {
     const [k, v] = a.replace(/^--/, '').split('=');
-    return [k, v ?? 'true'];
+    return [k ?? '', v ?? 'true'];
   }),
 );
 const port = Number(args.port);
 const delay = Number(args.delay ?? 0);
+const ignored = new Set((args.ignore ?? '').split(',').filter(Boolean));
 
-process.on('SIGINT', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    if (ignored.has(signal)) console.log(`ignored ${signal}`);
+    else process.exit(0);
+  });
+}
+
+if (args['print-env']) {
+  for (const key of args['print-env'].split(',')) console.log(`env ${key}=${process.env[key] ?? '<unset>'}`);
+}
 
 if (args.crash) {
   console.log('starting then crashing');
@@ -38,6 +49,14 @@ if (args.crash) {
         res.statusCode = Number(args.status ?? 200);
         res.end('ok');
       })
-      .listen(port, () => console.log(`listening ${port}`));
+      .listen(port, () => {
+        console.log(`listening ${port}`);
+        if (args['crash-after-ready']) {
+          setTimeout(() => {
+            console.error('fatal: lost database connection');
+            process.exit(4);
+          }, Number(args['crash-after-ready']));
+        }
+      });
   }, delay);
 }
