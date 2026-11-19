@@ -117,7 +117,8 @@ devfleet down                          # stop everything, like Ctrl+C in the up 
 - `restart` also works on a service that crashed, failed to start, or was skipped, as long as its dependencies are ready.
 - Progress is shown in both terminals, and the command exits with 1 if a service does not become ready.
 - `devfleet up` stays open while a service you stopped on purpose could be restarted, so stopping everything with `devfleet stop` does not end it; use Ctrl+C or `devfleet down`.
-- The commands talk to `devfleet up` through a local socket in the temp folder, keyed by the path of `devfleet.yaml`. Only one `devfleet up` per config file accepts these commands; a second one prints a note and runs without it.
+- The commands talk to `devfleet up` through a local socket keyed by the path of `devfleet.yaml`. Only one `devfleet up` per config file accepts these commands; a second one prints a note and runs without it.
+- The socket lives in a directory only you can use: `$XDG_RUNTIME_DIR/devfleet/` when that is set, otherwise `devfleet-<uid>/` in the temp folder, created with mode 700. devfleet refuses a directory that is a symlink, belongs to another user, or is open to group or others, and the socket itself is mode 600. On Windows it is a named pipe.
 
 ## Configuration (`devfleet.yaml`)
 
