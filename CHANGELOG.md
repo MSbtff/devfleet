@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-20
+
 ### Added
 
 - `devfleet restart <name...>` and `devfleet stop <name...>`: restart or stop services and groups inside a running `devfleet up` from another terminal. Restarts stop dependents first and start in dependency order, and work on crashed, failed, or skipped services too.
@@ -39,5 +41,6 @@ First public release.
 - English CLI messages, help text, and generated `devfleet.yaml` comments.
 - End-to-end tests for the CLI and the stop, crash, and health-timeout paths, run on Linux and macOS with Node 22 and 24, plus a Node 20 runtime check of the packed tarball.
 
-[Unreleased]: https://github.com/MSbtff/devfleet/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/MSbtff/devfleet/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/MSbtff/devfleet/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/MSbtff/devfleet/releases/tag/v0.1.0
