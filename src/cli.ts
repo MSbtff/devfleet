@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { findConfig, loadConfig, CONFIG_NAMES } from './config.ts';
 import { startFleet, planUp, formatSummary, formatTable, displayPath, statusLabel, type Plan } from './runner.ts';
-import { controlPath, serveControl, sendControl } from './control.ts';
+import { controlPath, serveControl, sendControl, UnsafeControlDirError } from './control.ts';
 import { resolveTargets } from './graph.ts';
 import { composeArgs } from './infra.ts';
 import { detectProject, renderConfig } from './init.ts';
@@ -163,8 +163,12 @@ async function cmdUp(opts: Args): Promise<void> {
     unsubscribe();
     if (result.error) logger.system(`${request.cmd} failed: ${result.error}`);
     return reply.done({ ...result, pid: process.pid, rows: fleet.summarize() });
+  }).catch((err: Error) => {
+    if (!(err instanceof UnsafeControlDirError)) throw err;
+    logger.system(`${err.message} \`devfleet restart\`, \`stop\`, and \`down\` cannot reach this run.`);
+    return undefined;
   });
-  if (!control) {
+  if (control === null) {
     logger.system('Another devfleet up is already running for this config; `devfleet restart` and `stop` will talk to that one.');
   }
 
@@ -189,7 +193,10 @@ async function cmdUp(opts: Args): Promise<void> {
 
 async function cmdStatus(opts: Args): Promise<void> {
   const config = requireConfig(opts);
-  const live = await sendControl(controlPath(config), { cmd: 'status' }).catch(() => null);
+  const live = await sendControl(controlPath(config), { cmd: 'status' }).catch((err: Error) => {
+    if (err instanceof UnsafeControlDirError) console.error(err.message);
+    return null;
+  });
   const managed = new Map((live?.rows ?? []).map((r) => [r.name, r]));
   const rows = await Promise.all(
     Object.values(config.services).map(async (svc): Promise<string[]> => {
@@ -285,5 +292,7 @@ if (opts.version) {
 } else {
   const run = COMMANDS[command];
   if (!run) fail(`Unknown command: ${command}\n\n${HELP}`);
-  Promise.resolve(run(opts)).catch((err: Error) => fail(err.stack ?? err.message));
+  Promise.resolve(run(opts)).catch((err: Error) =>
+    fail(err instanceof UnsafeControlDirError ? err.message : (err.stack ?? err.message)),
+  );
 }

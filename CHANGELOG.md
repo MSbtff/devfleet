@@ -16,6 +16,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `devfleet down` also stops a running `devfleet up` before stopping the infra containers, and no longer fails when no infra is configured but an `up` was stopped.
 - `devfleet up` no longer exits while a service stopped with `devfleet stop` could still be restarted.
 
+### Security
+
+- The control socket moved from a predictable name in the shared temp folder to a per-user directory: `$XDG_RUNTIME_DIR/devfleet/` when set, otherwise `<tmpdir>/devfleet-<uid>/` with mode 700. Both `devfleet up` and the commands that connect to it refuse the directory if it is a symlink, is owned by another user, or is accessible to group or others, so another local user can no longer plant a socket that `restart`, `stop`, `status`, or `down` would talk to. The socket is set to mode 600, and a stale socket is only removed when it belongs to the current user.
+- Text received over the control socket has control characters (C0 except tab, DEL, and C1) removed before it is printed, so it cannot inject ANSI/OSC escape sequences into the terminal. `devfleet up` rejects `restart` and `stop` requests whose names are not plain service names before logging them.
+
 ## [0.1.0] - 2026-11-18
 
 First public release.

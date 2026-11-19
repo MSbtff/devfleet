@@ -40,7 +40,35 @@ export interface ControlServer {
   close(): Promise<void>;
 }
 
-/** Socket path for a config file. Kept in the temp folder so long project paths don't hit the Unix socket length limit. */
+/** Thrown when the socket directory or a socket in it could be controlled by another user. */
+export class UnsafeControlDirError extends Error {
+  override name = 'UnsafeControlDirError';
+}
+
+const isWindows = process.platform === 'win32';
+
+/** The current user's ID. Only called off Windows, where `process.getuid` always exists. */
+const currentUid = (): number => process.getuid?.() ?? -1;
+
+/** Whether `dir` is a real directory owned by the current user that nobody else can write to. */
+function isOwnPrivateDir(dir: string): boolean {
+  const stat = fs.lstatSync(dir, { throwIfNoEntry: false });
+  return Boolean(stat?.isDirectory() && stat.uid === currentUid() && (stat.mode & 0o022) === 0);
+}
+
+/**
+ * Directory that holds the control sockets, private to the current user.
+ * `$XDG_RUNTIME_DIR/devfleet` when that is set and belongs to this user, otherwise `<tmpdir>/devfleet-<uid>`.
+ * Both stay short enough for the Unix socket path limit (about 104 bytes), which long project paths would not.
+ */
+export function controlDir(env: NodeJS.ProcessEnv = process.env): string {
+  const runtime = env.XDG_RUNTIME_DIR;
+  // A relative or foreign XDG_RUNTIME_DIR (left over after `su`, for example) is ignored, as the XDG spec asks.
+  if (runtime && path.isAbsolute(runtime) && isOwnPrivateDir(runtime)) return path.join(runtime, 'devfleet');
+  return path.join(os.tmpdir(), `devfleet-${currentUid()}`);
+}
+
+/** Socket path for a config file: a named pipe on Windows, a socket in {@link controlDir} elsewhere. */
 export function controlPath(config: Pick<Config, 'root' | 'file'>): string {
   let target = path.resolve(config.file ?? config.root);
   try {
@@ -49,15 +77,66 @@ export function controlPath(config: Pick<Config, 'root' | 'file'>): string {
     /* not created yet */
   }
   const id = crypto.createHash('sha1').update(target).digest('hex').slice(0, 12);
-  return process.platform === 'win32' ? `\\\\.\\pipe\\devfleet-${id}` : path.join(os.tmpdir(), `devfleet-${id}.sock`);
+  // Windows named pipes keep the default named-pipe ACL (full control for the creator, SYSTEM, and
+  // administrators; read-only for everyone else). Node has no API to set a pipe's ACL, so they are left as they were.
+  return isWindows ? `\\\\.\\pipe\\devfleet-${id}` : path.join(controlDir(), `${id}.sock`);
 }
+
+/**
+ * Throws {@link UnsafeControlDirError} unless `dir` is a directory (not a symlink) owned by `uid`
+ * with no permissions for group or others. Another user who could write there could plant a socket
+ * that `devfleet restart` and `stop` would talk to.
+ */
+export function checkControlDir(dir: string, uid: number = currentUid()): void {
+  const stat = fs.lstatSync(dir);
+  const refuse = (why: string) =>
+    new UnsafeControlDirError(
+      `Refusing to use ${dir} for the devfleet control socket: ${why}. ` +
+        'Remove it (devfleet recreates it) or point XDG_RUNTIME_DIR at a private directory.',
+    );
+  if (stat.isSymbolicLink()) throw refuse('it is a symlink');
+  if (!stat.isDirectory()) throw refuse('it is not a directory');
+  if (stat.uid !== uid) throw refuse(`it is owned by uid ${stat.uid}, not ${uid}`);
+  if (stat.mode & 0o077) throw refuse(`its mode is ${(stat.mode & 0o777).toString(8)}, expected 700`);
+}
+
+/** Creates the socket directory with mode 700 if it is missing, then checks it. */
+export function ensureControlDir(dir: string): void {
+  try {
+    fs.mkdirSync(dir, { mode: 0o700 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+  checkControlDir(dir);
+}
+
+/**
+ * Removes C0 control characters except tab, DEL, and C1 control characters, so text from the socket
+ * cannot carry ANSI/OSC escape sequences (or bare ESC, CSI, BEL) to the terminal.
+ */
+export function stripControlChars(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g, '');
+}
+
+/** Service names a client may send. Letters and digits in any script plus a few separators, no spaces or controls. */
+const SERVICE_NAME = /^[\p{L}\p{M}\p{N}._:@\/+-]{1,128}$/u;
+const MAX_NAMES = 256;
 
 function isRequest(value: unknown): value is ControlRequest {
   if (typeof value !== 'object' || value === null) return false;
   const { cmd, names } = value as { cmd?: unknown; names?: unknown };
   if (cmd === 'status' || cmd === 'shutdown') return true;
-  return (cmd === 'restart' || cmd === 'stop') && Array.isArray(names) && names.every((n) => typeof n === 'string');
+  return (
+    (cmd === 'restart' || cmd === 'stop') &&
+    Array.isArray(names) &&
+    names.length <= MAX_NAMES &&
+    names.every((n) => typeof n === 'string' && SERVICE_NAME.test(n))
+  );
 }
+
+/** JSON reviver that strips control characters from every string value. */
+const sanitize = (_key: string, value: unknown): unknown =>
+  typeof value === 'string' ? stripControlChars(value) : value;
 
 function listen(server: net.Server, socketPath: string): Promise<NodeJS.ErrnoException | null> {
   return new Promise((resolve) => {
@@ -87,6 +166,7 @@ function isLive(socketPath: string): Promise<boolean> {
  * A socket left behind by a process that was killed is removed and reused.
  */
 export async function serveControl(socketPath: string, handler: ControlHandler): Promise<ControlServer | null> {
+  if (!isWindows) ensureControlDir(path.dirname(socketPath));
   const server = net.createServer((socket) => {
     socket.on('error', () => {
       /* the client went away; keep serving others */
@@ -128,17 +208,30 @@ export async function serveControl(socketPath: string, handler: ControlHandler):
   });
 
   let err = await listen(server, socketPath);
-  if (err?.code === 'EADDRINUSE' && process.platform !== 'win32') {
+  if (err?.code === 'EADDRINUSE' && !isWindows) {
     if (await isLive(socketPath)) return null;
+    const stale = fs.lstatSync(socketPath, { throwIfNoEntry: false });
+    if (stale && stale.uid !== currentUid()) {
+      throw new UnsafeControlDirError(`Refusing to remove ${socketPath}: it is owned by uid ${stale.uid}, not ${currentUid()}.`);
+    }
     fs.rmSync(socketPath, { force: true });
     err = await listen(server, socketPath);
   }
   if (err?.code === 'EADDRINUSE') return null;
   if (err) throw err;
+  if (!isWindows) {
+    // The directory is already private; this keeps the socket private even if it is moved or the directory loosened.
+    try {
+      fs.chmodSync(socketPath, 0o600);
+    } catch (chmodErr) {
+      server.close();
+      throw chmodErr;
+    }
+  }
   server.unref();
 
   const unlink = () => {
-    if (process.platform !== 'win32') fs.rmSync(socketPath, { force: true });
+    if (!isWindows) fs.rmSync(socketPath, { force: true });
   };
   process.once('exit', unlink);
   return {
@@ -157,12 +250,23 @@ export async function serveControl(socketPath: string, handler: ControlHandler):
 /**
  * Sends a request to the running `devfleet up`. Progress lines go to `onLog`.
  * Resolves with null when no `devfleet up` is running for this config.
+ * Every string in the reply has control characters removed, so it is safe to print.
+ * Rejects with {@link UnsafeControlDirError} when the socket directory is not private to this user.
  */
 export function sendControl(
   socketPath: string,
   request: ControlRequest,
   onLog: (text: string) => void = () => {},
 ): Promise<ControlResult | null> {
+  if (!isWindows) {
+    const dir = path.dirname(socketPath);
+    if (!fs.existsSync(dir)) return Promise.resolve(null); // nothing has ever listened here
+    try {
+      checkControlDir(dir);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
   return new Promise((resolve, reject) => {
     const socket = net.connect(socketPath);
     let connected = false;
@@ -176,7 +280,7 @@ export function sendControl(
         .on('line', (line) => {
           let message: Message;
           try {
-            message = JSON.parse(line) as Message;
+            message = JSON.parse(line, sanitize) as Message;
           } catch {
             return;
           }
