@@ -195,6 +195,26 @@ npm run build       # produce dist/
 | `src/health.ts`, `src/ports.ts` | Health checks and port ownership |
 | `src/logger.ts` | Colored, prefixed logs and log files |
 
+### Architecture
+
+The diagrams follow the [C4 model](https://c4model.com/), zooming in one level at a time, plus a sequence diagram for `devfleet restart`.
+
+**Level 1: System context.** devfleet sits between the developer, the local service processes, the Docker Compose infra, and `devfleet.yaml`.
+
+![C4 level 1: system context](docs/architecture/c4-1-system-context.svg)
+
+**Level 2: Containers.** A running `devfleet up` is a supervisor process. The `restart`, `stop`, `status`, and `down` commands run as separate CLI processes and reach it through a local control socket. Both processes derive the socket path from the path of `devfleet.yaml`.
+
+![C4 level 2: containers](docs/architecture/c4-2-container.svg)
+
+**Level 3: Components of `devfleet up`.** `serveControl` passes each request to a handler in `cmdUp`. The handler calls `Fleet` and subscribes to the `Logger` so progress lines go back to the client.
+
+![C4 level 3: components of devfleet up](docs/architecture/c4-3-component.svg)
+
+**`devfleet restart` sequence.** Services stop in reverse wave order (dependents first) and start again in wave order, each one only once its dependencies are ready. The client receives progress lines while this runs, then a single result line.
+
+![Sequence diagram of devfleet restart](docs/architecture/restart-sequence.svg)
+
 ### Adding a detection rule
 
 Add one object to `RULES` in `src/detectors.ts` and `init` will recognize a new component.
