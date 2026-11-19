@@ -76,9 +76,11 @@ npm link            # makes the devfleet command available everywhere
 |---|---|
 | `devfleet init` | Analyze the current folder and create `devfleet.yaml` (`--print`: print instead of writing, `--force`: overwrite) |
 | `devfleet up [name...]` | Start services or groups together with their dependencies. Starts everything when no name is given |
-| `devfleet status` | Port and health status of each service, plus the process holding the port |
+| `devfleet status` | Port and health status of each service, plus the process holding the port. While `devfleet up` is running, a FLEET column shows what it knows (starting, crashed, stopped, …) |
+| `devfleet restart <name...>` | Restart services or groups inside the running `devfleet up`, from another terminal |
+| `devfleet stop <name...>` | Stop services or groups inside the running `devfleet up`; `devfleet restart` brings them back |
 | `devfleet logs <name> [-f]` | Show a service's log file |
-| `devfleet down` | Stop the infra containers (data volumes are kept) |
+| `devfleet down` | Stop the running `devfleet up` (if any) and the infra containers (data volumes are kept) |
 
 Options for `up`
 
@@ -99,6 +101,23 @@ devfleet up gateway-server -q          # start everything, keep the screen quiet
 devfleet up --only account-service     # start everything, watch only Account's logs
 devfleet up account-service --no-deps  # Eureka is already running in your IDE debugger
 ```
+
+### Controlling a running `devfleet up`
+
+`devfleet up` keeps running in its terminal. From any other terminal in the same project you can:
+
+```bash
+devfleet restart account-service       # stop it, start it again, wait until it is healthy
+devfleet restart core                  # groups work too: dependents stop first, then start in dependency order
+devfleet stop menus-service            # stop one service; the rest keep running
+devfleet down                          # stop everything, like Ctrl+C in the up terminal, then stop the infra
+```
+
+- `restart` and `stop` only touch the services you name. Services that depend on them keep running, which suits Spring apps that reconnect to Eureka or a Config Server on their own.
+- `restart` also works on a service that crashed, failed to start, or was skipped, as long as its dependencies are ready.
+- Progress is shown in both terminals, and the command exits with 1 if a service does not become ready.
+- `devfleet up` stays open while a service you stopped on purpose could be restarted, so stopping everything with `devfleet stop` does not end it; use Ctrl+C or `devfleet down`.
+- The commands talk to `devfleet up` through a local socket in the temp folder, keyed by the path of `devfleet.yaml`. Only one `devfleet up` per config file accepts these commands; a second one prints a note and runs without it.
 
 ## Configuration (`devfleet.yaml`)
 
@@ -168,12 +187,33 @@ npm run build       # produce dist/
 | `src/args.ts` | Argument parsing |
 | `src/config.ts` | Reading and validating `devfleet.yaml` and `.env` |
 | `src/graph.ts` | Target resolution, cycle detection, start waves |
-| `src/runner.ts` | Process launch, health waiting, shutdown cleanup |
+| `src/runner.ts` | Process launch, health waiting, restart and shutdown cleanup |
+| `src/control.ts` | Control socket between `devfleet up` and `restart`/`stop`/`status`/`down` |
 | `src/infra.ts` | Docker Compose infra startup and readiness |
 | `src/init.ts` | Spring Boot and Compose project analysis |
 | `src/detectors.ts` | Spring Cloud server detection rules (Config, Eureka, Consul, Nacos) |
 | `src/health.ts`, `src/ports.ts` | Health checks and port ownership |
 | `src/logger.ts` | Colored, prefixed logs and log files |
+
+### Architecture
+
+The diagrams follow the [C4 model](https://c4model.com/), zooming in one level at a time, plus a sequence diagram for `devfleet restart`.
+
+**Level 1: System context.** devfleet sits between the developer, the local service processes, the Docker Compose infra, and `devfleet.yaml`.
+
+![C4 level 1: system context](docs/architecture/c4-1-system-context.svg)
+
+**Level 2: Containers.** A running `devfleet up` is a supervisor process. The `restart`, `stop`, `status`, and `down` commands run as separate CLI processes and reach it through a local control socket. Both processes derive the socket path from the path of `devfleet.yaml`.
+
+![C4 level 2: containers](docs/architecture/c4-2-container.svg)
+
+**Level 3: Components of `devfleet up`.** `serveControl` passes each request to a handler in `cmdUp`. The handler calls `Fleet` and subscribes to the `Logger` so progress lines go back to the client.
+
+![C4 level 3: components of devfleet up](docs/architecture/c4-3-component.svg)
+
+**`devfleet restart` sequence.** Services stop in reverse wave order (dependents first) and start again in wave order, each one only once its dependencies are ready. The client receives progress lines while this runs, then a single result line.
+
+![Sequence diagram of devfleet restart](docs/architecture/restart-sequence.svg)
 
 ### Adding a detection rule
 
@@ -195,7 +235,7 @@ Rules are applied in array order, and a dependency that would create a cycle wit
 
 - [ ] Detect Node, Python, and Go services (`package.json`, `pyproject.toml`, `go.mod`)
 - [ ] Jar mode: build once with `bootJar` and run `java -jar`, so Gradle daemons don't stay resident per service
-- [ ] `devfleet restart <name>` to restart one running service from another terminal
+- [x] `devfleet restart <name>` to restart one running service from another terminal
 - [ ] Restart a service when its files change (`--watch`)
 - [ ] Hybrid mode: run most services as Compose containers and only the ones you are editing locally
 - [ ] Verify Windows support
