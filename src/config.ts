@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { findCycle } from './graph.ts';
-import { isRecord, type Config, type Health, type Infra, type Service } from './types.ts';
+import { isRecord, type Config, type Health, type Infra, type RestartPolicy, type Service } from './types.ts';
 
 export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'] as const;
 const DEFAULT_HEALTH_TIMEOUT = 180;
+const DEFAULT_MAX_RESTARTS = 3;
 
 /** Looks for the config file from the current folder upwards. */
 export function findConfig(start: string = process.cwd()): string | null {
@@ -68,6 +69,10 @@ export function normalizeConfig(raw: unknown, root: string): Config {
   const data = isRecord(raw) ? raw : {};
   if (raw != null && !isRecord(raw)) errors.push('The top level of the config file must be a "key: value" mapping.');
 
+  const defaults = {
+    restart: normalizeRestart(data.restart, 'restart', 'no', errors),
+    maxRestarts: normalizeCount(data.max_restarts, 'max_restarts', DEFAULT_MAX_RESTARTS, errors),
+  };
   const services: Record<string, Service> = {};
   const rawServices = data.services ?? {};
   if (!isRecord(rawServices)) {
@@ -93,6 +98,8 @@ export function normalizeConfig(raw: unknown, root: string): Config {
         port,
         health: normalizeHealth(s.health, port, name, errors),
         stopTimeout: Number(s.stop_timeout ?? 15),
+        restart: normalizeRestart(s.restart, `${name}: restart`, defaults.restart, errors),
+        maxRestarts: normalizeCount(s.max_restarts, `${name}: max_restarts`, defaults.maxRestarts, errors),
       };
     }
   }
@@ -160,6 +167,22 @@ function normalizeHealth(health: unknown, port: number | null, name: string, err
   if (health.tcp) return { ...merged, type: 'tcp', port: Number(health.tcp) };
   if (port) return { ...merged, type: 'tcp', port };
   return { ...merged, type: 'none' };
+}
+
+function normalizeRestart(value: unknown, label: string, fallback: RestartPolicy, errors: string[]): RestartPolicy {
+  if (value == null) return fallback;
+  if (value === false || value === 'no') return 'no';
+  if (value === 'on-failure') return 'on-failure';
+  errors.push(`${label} must be "no" or "on-failure".`);
+  return fallback;
+}
+
+function normalizeCount(value: unknown, label: string, fallback: number, errors: string[]): number {
+  if (value == null) return fallback;
+  const count = Number(value);
+  if (Number.isInteger(count) && count >= 0) return count;
+  errors.push(`${label} must be a whole number of 0 or more.`);
+  return fallback;
 }
 
 function toList(value: unknown): string[] {

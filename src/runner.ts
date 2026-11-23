@@ -20,6 +20,7 @@ export type Status =
   | 'failed'
   | 'skipped'
   | 'crashed'
+  | 'restarting'
   | 'stopping'
   | 'stopped';
 
@@ -35,6 +36,12 @@ interface ServiceState {
   exited?: Promise<ExitInfo>;
   startedAt?: number;
   readySeconds?: string;
+  /** When the current process became ready */
+  readyAt?: number;
+  /** Automatic restarts so far in this run */
+  restarts?: number;
+  /** Automatic restarts in a row since the service last stayed up */
+  attempts?: number;
 }
 
 export interface Plan {
@@ -53,6 +60,8 @@ export interface UpOptions {
   out?: Output;
   color?: boolean;
   externalTimeoutMs?: number;
+  /** Delay before the first automatic restart; doubles with each attempt in a row */
+  restartDelayMs?: number;
 }
 
 export interface SummaryRow {
@@ -62,6 +71,8 @@ export interface SummaryRow {
   pid: number | null;
   readySeconds: string | null;
   logFile: string | null;
+  /** Automatic restarts so far in this run (missing in replies from devfleet 0.2.0) */
+  restarts?: number;
 }
 
 export interface ActionResult {
@@ -173,6 +184,13 @@ function waitForExit(child: ChildProcess): Promise<number> {
   });
 }
 
+const RESTART_RESET_MS = 60_000;
+const MAX_RESTART_DELAY_MS = 30_000;
+
+function formatSeconds(ms: number): string {
+  return `${Number((ms / 1000).toFixed(1))}s`;
+}
+
 /** Starts services in dependency order. */
 export function startFleet(config: Config, names: readonly string[] = [], opts: UpOptions = {}): Fleet {
   const {
@@ -184,6 +202,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     out = process.stdout,
     color,
     externalTimeoutMs = 30_000,
+    restartDelayMs = 1000,
   } = opts;
   const plan = planUp(config, names, { deps });
   const logger = new Logger({
@@ -205,6 +224,8 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   let startupDone = false;
   /** Services a restart or stop request is working on */
   const busy = new Set<string>();
+  /** Automatic restarts in progress, so a restart or stop request can cancel them */
+  const autoRestarts = new Map<string, { cancel: AbortController; done: Promise<void> }>();
   let resolveAllExited!: () => void;
   const allExited = new Promise<void>((resolve) => (resolveAllExited = resolve));
 
@@ -342,6 +363,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         set(name, { status: 'crashed' });
         logger.error(name, `exited (${signal ?? `code ${code}`})`);
         logger.dumpTail(name);
+        if (svc.restart === 'on-failure') autoRestart(name);
       }
       checkAllExited();
     });
@@ -349,7 +371,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     const result = await waitHealthy(svc.health, { signal: abort.signal, alive: () => isRunning(child) });
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     if (result === 'healthy') {
-      set(name, { status: 'ready', readySeconds: seconds });
+      set(name, { status: 'ready', readySeconds: seconds, readyAt: Date.now() });
       const address = svc.port ? ` · http://127.0.0.1:${svc.port}` : '';
       logger.ok(name, `ready in ${seconds}s${address}`);
       return true;
@@ -458,7 +480,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   }
 
   function checkAllExited(): void {
-    if (!startupDone || busy.size) return;
+    if (!startupDone || busy.size || autoRestarts.size) return;
     const states = [...state.values()];
     if (states.some((s) => s.child && isRunning(s.child))) return;
     if (states.some((s) => s.status === 'stopped')) return;
@@ -491,6 +513,17 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     if (error) return { ok: false, error };
     for (const name of names) busy.add(name);
     try {
+      // A request takes over from an automatic restart, e.g. to stop a service that keeps crashing.
+      await Promise.all(
+        names.map((name) => {
+          const auto = autoRestarts.get(name);
+          if (!auto) return;
+          logger.info(name, 'cancelling the automatic restart');
+          auto.cancel.abort();
+          return auto.done;
+        }),
+      );
+      if (stopping) return { ok: false, error: 'devfleet is shutting down' };
       return await action();
     } finally {
       for (const name of names) busy.delete(name);
@@ -508,6 +541,67 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     });
   }
 
+  /** Starts a stopped service again if its dependencies are ready. */
+  async function startAgain(name: string): Promise<boolean> {
+    if (stopping) return false;
+    const notReady = service(name).dependsOn.filter((dep) => {
+      const status = state.get(dep)?.status;
+      return status !== 'ready' && status !== 'external';
+    });
+    if (notReady.length) {
+      set(name, { status: 'skipped' });
+      logger.warn(name, `not started: dependencies are not ready (${notReady.join(', ')})`);
+      return false;
+    }
+    return launch(name);
+  }
+
+  /**
+   * Restarts a service that crashed after becoming ready (restart: on-failure).
+   * Waits restartDelayMs, then twice as long for each further attempt in a row, up to 30 seconds.
+   * A service that stayed up for a minute before crashing gets its full max_restarts again.
+   */
+  function autoRestart(name: string): void {
+    // A restart or stop request is already handling it.
+    if (busy.has(name) || autoRestarts.has(name) || stopping) return;
+    const cancel = new AbortController();
+    const onStop = () => cancel.abort();
+    abort.signal.addEventListener('abort', onStop, { once: true });
+    const done = runAutoRestart(name, cancel.signal).finally(() => {
+      abort.signal.removeEventListener('abort', onStop);
+      autoRestarts.delete(name);
+      checkAllExited();
+    });
+    autoRestarts.set(name, { cancel, done });
+  }
+
+  async function runAutoRestart(name: string, cancelled: AbortSignal): Promise<void> {
+    const svc = service(name);
+    const st = state.get(name);
+    let attempts = st?.readyAt && Date.now() - st.readyAt >= RESTART_RESET_MS ? 0 : (st?.attempts ?? 0);
+    try {
+      while (!cancelled.aborted) {
+        if (attempts >= svc.maxRestarts) {
+          logger.error(name, `not restarting: gave up after ${attempts} automatic restart(s) (max_restarts: ${svc.maxRestarts})`);
+          set(name, { status: 'crashed' });
+          return;
+        }
+        attempts += 1;
+        const delay = Math.min(restartDelayMs * 2 ** (attempts - 1), MAX_RESTART_DELAY_MS);
+        set(name, { status: 'restarting', attempts, restarts: (state.get(name)?.restarts ?? 0) + 1 });
+        logger.warn(name, `restarting in ${formatSeconds(delay)} (attempt ${attempts}/${svc.maxRestarts})`);
+        await sleep(delay, cancelled);
+        if (cancelled.aborted) return;
+        await stopOne(name, false); // clears anything the crashed process left on the port
+        if (cancelled.aborted) return;
+        if (await startAgain(name)) return;
+      }
+    } finally {
+      set(name, { attempts });
+      if (cancelled.aborted && state.get(name)?.status === 'restarting') set(name, { status: 'crashed' });
+    }
+  }
+
   function restart(names: readonly string[]): Promise<ActionResult> {
     const unique = [...new Set(names)];
     return withBusy(unique, async () => {
@@ -519,21 +613,8 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       for (const wave of groups) {
         await Promise.all(
           wave.map(async (name) => {
-            if (stopping) {
-              failed.push(name);
-              return;
-            }
-            const notReady = service(name).dependsOn.filter((dep) => {
-              const status = state.get(dep)?.status;
-              return status !== 'ready' && status !== 'external';
-            });
-            if (notReady.length) {
-              set(name, { status: 'skipped' });
-              logger.warn(name, `not started: dependencies are not ready (${notReady.join(', ')})`);
-              failed.push(name);
-              return;
-            }
-            if (!(await launch(name))) failed.push(name);
+            if (await startAgain(name)) set(name, { attempts: 0 });
+            else failed.push(name);
           }),
         );
       }
@@ -552,6 +633,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         pid: st?.child && isRunning(st.child) ? (st.pid ?? null) : null,
         readySeconds: st?.readySeconds ?? null,
         logFile: logger.logFile(name),
+        restarts: st?.restarts ?? 0,
       };
     });
   }
@@ -578,6 +660,7 @@ const STATUS_LABEL: Record<Status, string> = {
   failed: '✖ failed',
   skipped: '– skipped',
   crashed: '✖ crashed',
+  restarting: '↻ restarting',
   stopping: '… stopping',
   stopped: '■ stopped',
 };
