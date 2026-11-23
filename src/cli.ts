@@ -218,7 +218,8 @@ async function cmdStatus(opts: Args): Promise<void> {
   // FLEET is what the running `devfleet up` knows: starting, crashed, stopped on request, ….
   const withFleet = rows.map(([name = '', port = '', status = '', who = '']) => {
     const row = managed.get(name);
-    return [name, port, status, row ? statusLabel(row.status) : '', who];
+    const restarts = row?.restarts ? ` · restarted ${row.restarts}×` : '';
+    return [name, port, status, row ? `${statusLabel(row.status)}${restarts}` : '', who];
   });
   console.log(`devfleet up is running (PID ${live.pid})`);
   console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'FLEET', 'PROCESS'], ...withFleet]));

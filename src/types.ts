@@ -16,7 +16,13 @@ export interface Service {
   health: Health;
   /** Seconds to wait for a clean exit after Ctrl+C */
   stopTimeout: number;
+  /** Whether to start the service again when it exits on its own after becoming ready */
+  restart: RestartPolicy;
+  /** Automatic restarts allowed in a row before giving up */
+  maxRestarts: number;
 }
+
+export type RestartPolicy = 'no' | 'on-failure';
 
 export interface Infra {
   composeFiles: string[];

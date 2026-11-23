@@ -5,6 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `restart: on-failure` and `max_restarts` (top level or per service): a service that exits on its own after becoming ready is started again after 1s, 2s, 4s, … (at most 30s), up to `max_restarts` times in a row (default 3). A service that stayed up for a minute gets its full budget again.
+- `devfleet stop` and `devfleet restart` cancel a pending automatic restart and take over.
+- `devfleet status` shows how many times the running `devfleet up` restarted each service.
+
 ## [0.2.0] - 2026-11-20
 
 ### Added

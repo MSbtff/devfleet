@@ -1,6 +1,8 @@
 // 테스트용 가짜 서비스.
 // 인자: --port=N --delay=ms --crash=ms --crash-after-ready=ms --orphan --status=503
 //       --ignore=SIGINT,SIGTERM --print-env=A,B
+//       --crash-times=N --counter=<file>: --crash-after-ready를 처음 N번 실행할 때만 적용한다
+import fs from 'node:fs';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -51,7 +53,13 @@ if (args.crash) {
       })
       .listen(port, () => {
         console.log(`listening ${port}`);
-        if (args['crash-after-ready']) {
+        let crash = Boolean(args['crash-after-ready']);
+        if (crash && args.counter) {
+          const runs = fs.existsSync(args.counter) ? Number(fs.readFileSync(args.counter, 'utf8')) : 0;
+          fs.writeFileSync(args.counter, String(runs + 1));
+          crash = runs < Number(args['crash-times'] ?? Infinity);
+        }
+        if (crash) {
           setTimeout(() => {
             console.error('fatal: lost database connection');
             process.exit(4);

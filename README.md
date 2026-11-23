@@ -49,6 +49,7 @@ devfleet              │ gateway-server     ✔ ready  7070  5.1s   15296
 - **Dependency order + health waiting**: a service starts only *after* its dependencies are ready. Services at the same level start in parallel.
 - **Infra readiness that understands init containers**: Compose services count as ready when they are running and healthy, or when a one-shot init container exits with code 0.
 - **Failure propagation**: when a service dies during startup, devfleet shows its last log lines and skips every service that depends on it.
+- **Automatic restarts**: with `restart: on-failure`, a service that crashes while you work (a dropped DB connection, an out-of-memory error) comes back on its own instead of staying down until you notice. devfleet waits a little longer after each crash in a row and gives up when restarting does not help.
 - **Port conflict reporting**: tells you which PID holds a port. A healthy service that is already running (for example, one you are debugging in your IDE) is reused as-is.
 - **Clean shutdown**: one Ctrl+C stops everything in reverse order (Gateway → business services → Eureka). Processes outside the process group, such as JVMs forked by the Gradle daemon, are found by port and stopped too.
 - **Unified logs**: every line is prefixed with a colored service name, and each service also gets `.devfleet/logs/<service>.log`.
@@ -126,6 +127,8 @@ devfleet down                          # stop everything, like Ctrl+C in the up 
 env_file: .env                 # environment variables injected into every service
 env:                           # extra variables (take precedence over env_file)
   SPRING_PROFILES_ACTIVE: local
+restart: on-failure            # default for every service: restart services that crash after becoming ready (default: no)
+max_restarts: 3                # automatic restarts in a row before giving up, default 3
 
 infra:                         # services started with `docker compose up -d` before the apps
   compose_file: compose.yaml   # for several files: compose_files: [a.yaml, b.yaml]
@@ -150,6 +153,7 @@ services:
       http: http://127.0.0.1:7071/actuator/health
       timeout: 300             # seconds, default 180
     stop_timeout: 20           # seconds to wait after Ctrl+C, default 15
+    restart: no                # overrides the top-level restart for this service
 
 groups:
   core: [eureka-server, account-service]
@@ -157,6 +161,48 @@ groups:
 
 When `health` is omitted, the service is ready as soon as `port` accepts connections. With `health: none` it is ready right after it starts.
 HTTP health checks treat 2xx and 3xx responses as healthy. Spring Actuator returns 503 while a dependency such as the DB is DOWN, so devfleet waits until the service is actually usable.
+
+### Automatic restarts
+
+Automatic restarts start a service again when it crashes while `devfleet up` is running.
+Without them, a service that dies while you work stays down until you notice — usually when a request fails — and run `devfleet restart` yourself.
+
+They are off by default. Turn them on for every service at the top level, and override per service:
+
+```yaml
+restart: on-failure     # every service: start it again when it crashes after becoming ready
+max_restarts: 3         # optional: restarts in a row before giving up, default 3
+
+services:
+  eureka-server:
+    restart: no         # but never this one
+  account-service:
+    max_restarts: 5     # and give this one more tries
+```
+
+A crash then looks like this in the `devfleet up` terminal, and the service is ready again a moment later:
+
+```
+✖ account-service exited (code 1)
+! account-service restarting in 1s (attempt 1/3)
+```
+
+Turn them on when crashes are transient and a fresh start fixes them:
+
+- a dropped connection to the DB, Eureka, or a Config Server that makes the app exit
+- a service that occasionally runs out of memory after running for a long time
+- a backend you leave running all day, or one that frontend developers only consume, where nobody watches its logs
+
+Leave them off when you want to see the crash: while you debug why a service dies, an automatic restart only gets in the way.
+They do not help with a bug that crashes the service every time either; devfleet gives up after `max_restarts` tries in a row.
+
+How it works:
+
+- devfleet waits 1 second before the first restart, then twice as long before each further restart in a row (2s, 4s, …, at most 30s).
+- After `max_restarts` restarts in a row it gives up and leaves the service as crashed. A service that stayed up for a minute before crashing gets its full `max_restarts` again.
+- Services that depend on the crashed one keep running. If its own dependencies are not ready when the restart is due, that attempt fails and counts toward `max_restarts`.
+- Failures during the first start (exiting before becoming ready, or a health check timeout) are not retried: they usually mean a configuration problem.
+- `devfleet stop` or `devfleet restart` from another terminal cancels a pending automatic restart and takes over, so you can stop a service that keeps crashing. `devfleet status` shows how many times each service was restarted.
 
 ### Notes for Gradle `bootRun`
 
