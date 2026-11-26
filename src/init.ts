@@ -28,7 +28,12 @@ export interface DetectedApp extends FoundApp {
   port: number;
   health: string | null;
   runDir: string;
+  /** Run command; empty in jar mode */
   cmd: string;
+  /** Jar mode: the build that produces the jar */
+  build: { cmd: string; dir: string } | null;
+  /** Jar mode: the jar to run, relative to runDir */
+  jar: string | null;
   facts: AppFacts;
   /** Server roles this app fills (e.g. Spring Cloud Config) */
   roles: string[];
@@ -37,6 +42,8 @@ export interface DetectedApp extends FoundApp {
 
 export interface DetectedProject {
   root: string;
+  /** Apps are built once and run with java -jar instead of bootRun / spring-boot:run */
+  jar: boolean;
   envFile: string | null;
   apps: DetectedApp[];
   composeFile: string | null;
@@ -58,7 +65,10 @@ interface ComposeProject {
 }
 
 /** Scans the project for Spring Boot apps and the Compose setup. */
-export function detectProject(rootDir: string, { useDocker = true }: { useDocker?: boolean } = {}): DetectedProject {
+export function detectProject(
+  rootDir: string,
+  { useDocker = true, jar = false }: { useDocker?: boolean; jar?: boolean } = {},
+): DetectedProject {
   const root = path.resolve(rootDir);
   const envFile = fs.existsSync(path.join(root, '.env')) ? '.env' : null;
   const envVars = envFile ? parseEnv(fs.readFileSync(path.join(root, envFile), 'utf8')) : {};
@@ -66,7 +76,7 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
   walk(root, 0, found);
   const apps: DetectedApp[] = found.map((app) => ({
     ...app,
-    ...describeApp(app, root, envVars),
+    ...describeApp(app, root, envVars, jar),
     name: '',
     composeName: null,
     roles: [],
@@ -136,6 +146,7 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
 
   return {
     root,
+    jar,
     envFile,
     apps,
     composeFile: compose?.file ?? null,
@@ -201,7 +212,7 @@ function walk(dir: string, depth: number, acc: FoundApp[]): void {
   }
 }
 
-function describeApp(app: FoundApp, root: string, envVars: Record<string, string>) {
+function describeApp(app: FoundApp, root: string, envVars: Record<string, string>, jar: boolean) {
   const props = readSpringProps(app.appConfig);
   const resolve = (key: string): string | null =>
     props[key] == null ? null : resolvePlaceholders(String(props[key]), envVars);
@@ -220,7 +231,7 @@ function describeApp(app: FoundApp, root: string, envVars: Record<string, string
   return {
     port,
     health,
-    ...runCommand(app, root),
+    ...(jar ? jarCommand(app, root) : { ...runCommand(app, root), build: null, jar: null }),
     facts: { buildText: app.buildText, props },
   };
 }
@@ -240,6 +251,26 @@ function runCommand(app: FoundApp, root: string): { runDir: string; cmd: string 
     if (dir === root) break;
   }
   return { runDir: app.dir, cmd: gradle ? 'gradle bootRun' : 'mvn spring-boot:run' };
+}
+
+/** Jar mode: build the app's jar with the nearest wrapper, then run it from the app's own folder. */
+function jarCommand(app: FoundApp, root: string): Pick<DetectedApp, 'runDir' | 'cmd' | 'build' | 'jar'> {
+  const gradle = app.buildFile !== 'pom.xml';
+  const wrapper = gradle ? 'gradlew' : 'mvnw';
+  const jar = gradle ? 'build/libs/*.jar' : 'target/*.jar';
+  const result = (cmd: string, dir: string) => ({ runDir: app.dir, cmd: '', build: { cmd, dir }, jar });
+  if (fs.existsSync(path.join(app.dir, wrapper))) {
+    return result(gradle ? './gradlew bootJar' : './mvnw -q -DskipTests package', app.dir);
+  }
+  for (let dir = path.dirname(app.dir); dir.startsWith(root); dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, wrapper))) {
+      const rel = path.relative(dir, app.dir).split(path.sep);
+      const cmd = gradle ? `./gradlew :${rel.join(':')}:bootJar` : `./mvnw -q -DskipTests -pl ${rel.join('/')} -am package`;
+      return result(cmd, dir);
+    }
+    if (dir === root) break;
+  }
+  return result(gradle ? 'gradle bootJar' : 'mvn -q -DskipTests package', app.dir);
 }
 
 /** Reads default-profile values from application.yml/properties into a flat key map. */
@@ -347,6 +378,14 @@ export function renderConfig(project: DetectedProject): string {
       '',
     );
   }
+  if (project.jar) {
+    lines.push(
+      '# Jar mode: each app is built once and run with java -jar, so no Gradle daemon stays busy per app.',
+      '# Builds run one at a time and reuse one daemon; `devfleet restart <name>` rebuilds before restarting.',
+      '# build_concurrency: 2   # build several apps at once (faster, but one daemon each)',
+      '',
+    );
+  }
   lines.push('services:');
   const byName = Object.fromEntries(project.apps.map((a) => [a.name, a]));
   const ordered = waves(byName, project.apps.map((a) => a.name)).flat();
@@ -355,7 +394,16 @@ export function renderConfig(project: DetectedProject): string {
     if (app.roles.length) lines.push(`  # ${app.roles.join(', ')} server`);
     lines.push(`  ${scalar(name)}:`);
     lines.push(`    dir: ${scalar(path.relative(project.root, app.runDir) || '.')}`);
-    lines.push(`    cmd: ${scalar(app.cmd)}`);
+    if (app.build && app.jar) {
+      if (app.build.dir === app.runDir) {
+        lines.push(`    build: ${scalar(app.build.cmd)}`);
+      } else {
+        lines.push('    build:', `      cmd: ${scalar(app.build.cmd)}`, `      dir: ${scalar(path.relative(project.root, app.build.dir) || '.')}`);
+      }
+      lines.push(`    jar: ${scalar(app.jar)}`, '    # java_opts: -Xmx512m');
+    } else {
+      lines.push(`    cmd: ${scalar(app.cmd)}`);
+    }
     lines.push(`    port: ${app.port}`);
     if (app.dependsOn.length) lines.push(`    depends_on: [${app.dependsOn.map(scalar).join(', ')}]`);
     lines.push(app.health ? `    health: ${scalar(app.health)}` : '    # health: when omitted, the service is ready once the port accepts connections');

@@ -4,11 +4,25 @@ export type Health =
   | { type: 'tcp'; port: number; timeout: number; interval: number }
   | { type: 'none'; timeout: number; interval: number };
 
+export interface Build {
+  /** Shell command that builds the service, such as ./gradlew bootJar */
+  cmd: string;
+  /** Absolute working directory for the build */
+  dir: string;
+}
+
 export interface Service {
   name: string;
   /** Absolute working directory for the command */
   dir: string;
+  /** Shell command that runs the service. Empty when `jar` is set. */
   cmd: string;
+  /** Runs before the service starts (and again on `devfleet restart`) */
+  build: Build | null;
+  /** Jar to run with java -jar, relative to dir. `*` may appear in the file name. */
+  jar: string | null;
+  /** Options placed before -jar, such as -Xmx512m */
+  javaOpts: string;
   env: Record<string, string>;
   envFile: string | null;
   dependsOn: string[];
@@ -41,6 +55,8 @@ export interface Config {
   groups: Record<string, string[]>;
   infra: Infra | null;
   logDir: string;
+  /** How many builds may run at the same time */
+  buildConcurrency: number;
   errors: string[];
 }
 

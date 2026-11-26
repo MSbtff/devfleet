@@ -12,7 +12,7 @@ import type { SummaryRow } from './runner.ts';
 
 export type ControlRequest =
   | { cmd: 'status' }
-  | { cmd: 'restart'; names: string[] }
+  | { cmd: 'restart'; names: string[]; build?: boolean }
   | { cmd: 'stop'; names: string[] }
   | { cmd: 'shutdown' };
 
@@ -124,8 +124,9 @@ const MAX_NAMES = 256;
 
 function isRequest(value: unknown): value is ControlRequest {
   if (typeof value !== 'object' || value === null) return false;
-  const { cmd, names } = value as { cmd?: unknown; names?: unknown };
+  const { cmd, names, build } = value as { cmd?: unknown; names?: unknown; build?: unknown };
   if (cmd === 'status' || cmd === 'shutdown') return true;
+  if (build !== undefined && (cmd !== 'restart' || typeof build !== 'boolean')) return false;
   return (
     (cmd === 'restart' || cmd === 'stop') &&
     Array.isArray(names) &&

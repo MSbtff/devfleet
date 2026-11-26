@@ -155,3 +155,24 @@ test('Consul은 compose 서비스를 infra로 넣고, 서버를 못 찾은 Nacos
   assert.match(text, /# Please check:\n# {3}- Apps use Nacos \(stock\)/);
   assert.deepEqual(normalizeConfig(YAML.parse(text), root).errors, []);
 });
+
+test('init --jar: bootRun 대신 jar를 빌드하고 java -jar로 실행하는 설정을 만든다', () => {
+  const root = makeProject();
+  const project = detectProject(root, { useDocker: false, jar: true });
+  const apps = Object.fromEntries(project.apps.map((a) => [a.name, a]));
+  assert.deepEqual(apps['account-service'].build, { cmd: './gradlew bootJar', dir: path.join(root, 'AccountService') });
+  assert.equal(apps['account-service'].jar, 'build/libs/*.jar');
+  assert.equal(apps['account-service'].cmd, '');
+  // 멀티 모듈: 루트에서 빌드하고, 앱은 자기 폴더에서 실행한다
+  assert.deepEqual(apps.menus.build, { cmd: './gradlew :apps:menus:bootJar', dir: root });
+  assert.equal(apps.menus.runDir, path.join(root, 'apps/menus'));
+
+  const text = renderConfig(project);
+  assert.match(text, /# Jar mode:/);
+  const config = normalizeConfig(YAML.parse(text), root);
+  assert.deepEqual(config.errors, []);
+  assert.deepEqual(config.services.menus?.build, { cmd: './gradlew :apps:menus:bootJar', dir: root });
+  assert.equal(config.services.menus?.dir, path.join(root, 'apps/menus'));
+  assert.equal(config.services['account-service']?.jar, 'build/libs/*.jar');
+  assert.equal(config.services['account-service']?.cmd, '');
+});

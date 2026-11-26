@@ -193,6 +193,19 @@ test('up --dry-run은 실행하지 않고 단계별 계획을 보여준다', asy
   assert.match(unknown.stderr, /ghost/);
 });
 
+test('up --dry-run은 빌드 명령과 java -jar 실행을 보여주고, --no-build면 빌드를 뺀다', async () => {
+  const root = project({
+    services: {
+      app: { dir: 'app', build: './gradlew bootJar', jar: 'build/libs/*.jar', java_opts: '-Xmx256m', port: 7071 },
+    },
+  });
+  const plan = await run(['up', '--dry-run'], root);
+  assert.equal(plan.code, 0, plan.stderr);
+  assert.match(plan.stdout, /  app\n    build: \.\/gradlew bootJar  @ app\n    java -Xmx256m -jar build\/libs\/\*\.jar  @ app\n/);
+  const noBuild = await run(['up', '--dry-run', '--no-build'], root);
+  assert.doesNotMatch(noBuild.stdout, /build:/);
+});
+
 test('up → status → Ctrl+C: 모두 정리하고 exit 130, 이후 status·logs', async () => {
   const [pa, pb] = await Promise.all([freePort(), freePort()]);
   const root = project({

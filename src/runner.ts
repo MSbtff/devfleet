@@ -14,6 +14,7 @@ const INFRA = 'infra';
 
 export type Status =
   | 'waiting'
+  | 'building'
   | 'starting'
   | 'ready'
   | 'external'
@@ -62,6 +63,13 @@ export interface UpOptions {
   externalTimeoutMs?: number;
   /** Delay before the first automatic restart; doubles with each attempt in a row */
   restartDelayMs?: number;
+  /** Run each service's build before starting it (default true) */
+  build?: boolean;
+}
+
+export interface RestartOptions {
+  /** Run the service's build first (default true) */
+  build?: boolean;
 }
 
 export interface SummaryRow {
@@ -93,8 +101,11 @@ export interface Fleet {
   allExited: Promise<void>;
   /** Current status of every service in this run. */
   summarize(): SummaryRow[];
-  /** Stops the services (dependents first), then starts them again in dependency order. */
-  restart(names: readonly string[]): Promise<ActionResult>;
+  /**
+   * Rebuilds the services that have a build, then stops them (dependents first) and starts them again
+   * in dependency order. A service whose build fails keeps running as it was.
+   */
+  restart(names: readonly string[], options?: RestartOptions): Promise<ActionResult>;
   /** Stops the services, dependents first. Services that depend on them keep running. */
   stopServices(names: readonly string[]): Promise<ActionResult>;
   stop(options?: { force?: boolean }): Promise<void>;
@@ -187,6 +198,43 @@ function waitForExit(child: ChildProcess): Promise<number> {
 const RESTART_RESET_MS = 60_000;
 const MAX_RESTART_DELAY_MS = 30_000;
 
+/** Newest file matching `pattern` (relative to dir, `*` and `?` in the file name), skipping plain, sources, and javadoc jars. */
+export function findJar(dir: string, pattern: string): string | null {
+  const folder = path.resolve(dir, path.dirname(pattern));
+  const base = path.basename(pattern);
+  const regex = new RegExp(`^${base.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(folder);
+  } catch {
+    return null;
+  }
+  const candidates = entries
+    .filter((f) => regex.test(f) && !/-(plain|sources|javadoc)\.jar$/.test(f))
+    .flatMap((f) => {
+      const stat = fs.statSync(path.join(folder, f), { throwIfNoEntry: false });
+      return stat?.isFile() ? [{ file: path.join(folder, f), mtime: stat.mtimeMs }] : [];
+    })
+    .sort((a, b) => b.mtime - a.mtime);
+  return candidates[0]?.file ?? null;
+}
+
+function shellQuote(arg: string): string {
+  if (IS_WIN) return `"${arg}"`;
+  return /^[A-Za-z0-9_./:=-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/** java from JAVA_HOME when it is set, otherwise from PATH. */
+function javaCommand(env: NodeJS.ProcessEnv, javaOpts: string, jar: string): string {
+  const java = env.JAVA_HOME ? path.join(env.JAVA_HOME, 'bin', 'java') : 'java';
+  return [shellQuote(java), javaOpts.trim(), '-jar', shellQuote(jar)].filter(Boolean).join(' ');
+}
+
+/** The command a service runs, as shown in plans: the shell command, or java -jar for a jar. */
+export function describeCommand(svc: Pick<Config['services'][string], 'cmd' | 'jar' | 'javaOpts'>): string {
+  return svc.jar ? ['java', svc.javaOpts.trim(), '-jar', svc.jar].filter(Boolean).join(' ') : svc.cmd;
+}
+
 function formatSeconds(ms: number): string {
   return `${Number((ms / 1000).toFixed(1))}s`;
 }
@@ -203,6 +251,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     color,
     externalTimeoutMs = 30_000,
     restartDelayMs = 1000,
+    build: buildFirst = true,
   } = opts;
   const plan = planUp(config, names, { deps });
   const logger = new Logger({
@@ -224,6 +273,10 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   let startupDone = false;
   /** Services a restart or stop request is working on */
   const busy = new Set<string>();
+  /** Build processes that are running, so a shutdown can stop them */
+  const builds = new Set<ChildProcess>();
+  let buildSlots = config.buildConcurrency;
+  const buildQueue: (() => void)[] = [];
   /** Automatic restarts in progress, so a restart or stop request can cancel them */
   const autoRestarts = new Map<string, { cancel: AbortController; done: Promise<void> }>();
   let resolveAllExited!: () => void;
@@ -329,15 +382,39 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
 
     let env: NodeJS.ProcessEnv;
     try {
-      env = { ...baseEnv, ...readEnvFile(svc.envFile), ...svc.env };
+      env = serviceEnv(name);
     } catch (err) {
       set(name, { status: 'failed' });
       logger.error(name, (err as Error).message);
       return false;
     }
 
-    logger.info(name, `starting: ${svc.cmd}  (${displayPath(config.root, svc.dir)})`);
-    const child = spawn(svc.cmd, {
+    let cmd = svc.cmd;
+    if (svc.jar) {
+      const jar = findJar(svc.dir, svc.jar);
+      if (!jar) {
+        set(name, { status: 'failed' });
+        const hint = svc.build ? '' : ' Build it first, or add a build command.';
+        logger.error(name, `no jar matches ${svc.jar} in ${displayPath(config.root, svc.dir)}.${hint}`);
+        return false;
+      }
+      // Run a copy, so a later build can overwrite the original while this process keeps running.
+      const runJar = path.join(config.root, '.devfleet', 'jars', `${name}.jar`);
+      try {
+        fs.mkdirSync(path.dirname(runJar), { recursive: true });
+        fs.copyFileSync(jar, `${runJar}.tmp`);
+        fs.renameSync(`${runJar}.tmp`, runJar);
+      } catch (err) {
+        set(name, { status: 'failed' });
+        logger.error(name, `could not copy ${displayPath(config.root, jar)}: ${(err as Error).message}`);
+        return false;
+      }
+      cmd = javaCommand(env, svc.javaOpts, runJar);
+      logger.info(name, `running ${displayPath(config.root, jar)} as ${displayPath(config.root, runJar)}`);
+    }
+
+    logger.info(name, `starting: ${cmd}  (${displayPath(config.root, svc.dir)})`);
+    const child = spawn(cmd, {
       cwd: svc.dir,
       env,
       shell: true,
@@ -391,6 +468,72 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     return false;
   }
 
+  function serviceEnv(name: string): NodeJS.ProcessEnv {
+    const svc = service(name);
+    return { ...baseEnv, ...readEnvFile(svc.envFile), ...svc.env };
+  }
+
+  async function buildSlot(): Promise<void> {
+    while (buildSlots === 0) await new Promise<void>((resolve) => buildQueue.push(resolve));
+    buildSlots -= 1;
+  }
+
+  function releaseBuildSlot(): void {
+    buildSlots += 1;
+    buildQueue.shift()?.();
+  }
+
+  /**
+   * Runs the service's build. Builds wait for a free slot (build_concurrency, default 1), so with Gradle
+   * one daemon is reused instead of each service keeping its own.
+   * `mark` shows the service as building; a restart leaves the running service's status alone.
+   */
+  async function buildService(name: string, mark: boolean): Promise<boolean> {
+    const svc = service(name);
+    const build = svc.build!;
+    await buildSlot();
+    try {
+      if (stopping) return false;
+      let env: NodeJS.ProcessEnv;
+      try {
+        env = serviceEnv(name);
+      } catch (err) {
+        logger.error(name, (err as Error).message);
+        return false;
+      }
+      if (!fs.existsSync(build.dir)) {
+        logger.error(name, `build directory not found: ${build.dir}`);
+        return false;
+      }
+      if (mark && state.get(name)?.status === 'waiting') set(name, { status: 'building' });
+      logger.info(name, `building: ${build.cmd}  (${displayPath(config.root, build.dir)})`);
+      const startedAt = Date.now();
+      const child = spawn(build.cmd, {
+        cwd: build.dir,
+        env,
+        shell: true,
+        detached: !IS_WIN,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      builds.add(child);
+      logger.attach(name, child.stdout);
+      logger.attach(name, child.stderr);
+      const code = await waitForExit(child);
+      builds.delete(child);
+      if (state.get(name)?.status === 'building') set(name, { status: 'waiting' });
+      if (stopping) return false;
+      if (code !== 0) {
+        logger.error(name, `build failed (${code === -1 ? 'could not run it' : `code ${code}`})`);
+        logger.dumpTail(name);
+        return false;
+      }
+      logger.ok(name, `built in ${formatSeconds(Date.now() - startedAt)}`);
+      return true;
+    } finally {
+      releaseBuildSlot();
+    }
+  }
+
   function ensure(name: string): Promise<boolean> {
     let promise = promises.get(name);
     if (!promise) {
@@ -398,6 +541,8 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         if (!plan.targets.includes(name)) return waitExternal(name);
         const svc = service(name);
         set(name, { status: 'waiting' });
+        // Builds start right away, in start order, while dependencies are still coming up.
+        const built = buildFirst && svc.build ? buildService(name, true) : Promise.resolve(true);
         const results = await Promise.all(svc.dependsOn.map(ensure));
         if (stopping) {
           set(name, { status: 'skipped' });
@@ -407,6 +552,14 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         if (failed.length) {
           set(name, { status: 'skipped' });
           logger.warn(name, `skipped: dependencies are not ready (${failed.join(', ')})`);
+          return false;
+        }
+        if (!(await built)) {
+          set(name, { status: 'failed' });
+          return false;
+        }
+        if (stopping) {
+          set(name, { status: 'skipped' });
           return false;
         }
         return launch(name);
@@ -456,6 +609,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     stopping = true;
     abort.abort();
     if (infraChild) killGroup(infraChild, 'SIGINT');
+    for (const child of builds) killGroup(child, force ? 'SIGKILL' : 'SIGINT');
     stopPromise = (async () => {
       for (const wave of [...plan.waves].reverse()) {
         await Promise.all(wave.map((name) => stopOne(name, force)));
@@ -602,10 +756,23 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     }
   }
 
-  function restart(names: readonly string[]): Promise<ActionResult> {
+  function restart(names: readonly string[], { build = true }: RestartOptions = {}): Promise<ActionResult> {
     const unique = [...new Set(names)];
     return withBusy(unique, async () => {
-      const groups = wavesOf(unique);
+      // Build before stopping anything, so a failed build leaves the running process alone.
+      const buildFailed: string[] = [];
+      if (build) {
+        const toBuild = wavesOf(unique.filter((n) => service(n).build)).flat();
+        const results = await Promise.all(toBuild.map((name) => buildService(name, false)));
+        if (stopping) return { ok: false, error: 'devfleet is shutting down' };
+        toBuild.forEach((name, i) => {
+          if (results[i]) return;
+          buildFailed.push(name);
+          const running = state.get(name)?.child && isRunning(state.get(name)!.child!);
+          logger.warn(name, running ? 'not restarting: the build failed, so the running process is kept' : 'not restarting: the build failed');
+        });
+      }
+      const groups = wavesOf(unique.filter((n) => !buildFailed.includes(n)));
       for (const wave of [...groups].reverse()) {
         await Promise.all(wave.map((name) => stopOne(name, false)));
       }
@@ -619,7 +786,11 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         );
       }
       if (stopping) return { ok: false, error: 'devfleet is shutting down' };
-      return failed.length ? { ok: false, error: `not ready: ${failed.join(', ')}` } : { ok: true };
+      const problems = [
+        ...(buildFailed.length ? [`build failed: ${buildFailed.join(', ')}`] : []),
+        ...(failed.length ? [`not ready: ${failed.join(', ')}`] : []),
+      ];
+      return problems.length ? { ok: false, error: problems.join('; ') } : { ok: true };
     });
   }
 
@@ -654,6 +825,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
 
 const STATUS_LABEL: Record<Status, string> = {
   waiting: '… waiting',
+  building: '… building',
   starting: '… starting',
   ready: '✔ ready',
   external: '↺ external',

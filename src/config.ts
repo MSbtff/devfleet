@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { findCycle } from './graph.ts';
-import { isRecord, type Config, type Health, type Infra, type RestartPolicy, type Service } from './types.ts';
+import { isRecord, type Build, type Config, type Health, type Infra, type RestartPolicy, type Service } from './types.ts';
 
 export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'] as const;
 const DEFAULT_HEALTH_TIMEOUT = 180;
@@ -83,15 +83,20 @@ export function normalizeConfig(raw: unknown, root: string): Config {
         errors.push(`${name}: settings are empty.`);
         continue;
       }
-      if (!s.cmd) errors.push(`${name}: cmd is required.`);
+      if (s.cmd && s.jar) errors.push(`${name}: use either cmd or jar, not both.`);
+      else if (!s.cmd && !s.jar) errors.push(`${name}: cmd is required (or jar, to run a jar with java -jar).`);
+      const dir = path.resolve(root, String(s.dir ?? '.'));
       const port = s.port == null ? null : Number(s.port);
       if (port != null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
         errors.push(`${name}: port must be an integer between 1 and 65535.`);
       }
       services[name] = {
         name,
-        dir: path.resolve(root, String(s.dir ?? '.')),
+        dir,
         cmd: s.cmd == null ? '' : String(s.cmd),
+        build: normalizeBuild(s.build, dir, root, name, errors),
+        jar: normalizeJar(s.jar, name, errors),
+        javaOpts: s.java_opts == null ? '' : String(s.java_opts),
         env: stringifyEnv(s.env),
         envFile: s.env_file ? path.resolve(root, String(s.env_file)) : null,
         dependsOn: toList(s.depends_on),
@@ -141,6 +146,7 @@ export function normalizeConfig(raw: unknown, root: string): Config {
     groups,
     infra,
     logDir: path.resolve(root, String(data.log_dir ?? '.devfleet/logs')),
+    buildConcurrency: normalizeCount(data.build_concurrency, 'build_concurrency', 1, errors) || 1,
     errors,
   };
 }
@@ -167,6 +173,27 @@ function normalizeHealth(health: unknown, port: number | null, name: string, err
   if (health.tcp) return { ...merged, type: 'tcp', port: Number(health.tcp) };
   if (port) return { ...merged, type: 'tcp', port };
   return { ...merged, type: 'none' };
+}
+
+function normalizeBuild(value: unknown, dir: string, root: string, name: string, errors: string[]): Build | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'string') return { cmd: value, dir };
+  if (isRecord(value) && typeof value.cmd === 'string' && value.cmd) {
+    // build.dir is relative to the config file, like the service's own dir.
+    return { cmd: value.cmd, dir: value.dir == null ? dir : path.resolve(root, String(value.dir)) };
+  }
+  errors.push(`${name}: build must be a shell command or { cmd, dir }.`);
+  return null;
+}
+
+function normalizeJar(value: unknown, name: string, errors: string[]): string | null {
+  if (value == null || value === '') return null;
+  const jar = String(value);
+  if (path.dirname(jar).includes('*')) {
+    errors.push(`${name}: jar may use * only in the file name, e.g. build/libs/*.jar.`);
+    return null;
+  }
+  return jar;
 }
 
 function normalizeRestart(value: unknown, label: string, fallback: RestartPolicy, errors: string[]): RestartPolicy {
