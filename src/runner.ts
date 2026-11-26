@@ -6,6 +6,7 @@ import { resolveTargets, waves } from './graph.ts';
 import { isPortOpen, findListeners, describeListeners } from './ports.ts';
 import { checkOnce, waitHealthy, describeHealth, sleep } from './health.ts';
 import { Logger, type Output } from './logger.ts';
+import { stopDaemons, withDaemonRegistry } from './gradle.ts';
 import { composeArgs, evaluateInfra, readInfraState, type InfraVerdict } from './infra.ts';
 import type { Config } from './types.ts';
 
@@ -277,6 +278,11 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   const builds = new Set<ChildProcess>();
   let buildSlots = config.buildConcurrency;
   const buildQueue: (() => void)[] = [];
+  /** Builds that have been asked for and not finished, including those waiting for a slot */
+  let pendingBuilds = 0;
+  /** Builds use their own Gradle daemon registry here, so their daemons can be stopped once the builds are done. */
+  const daemonDir = config.gradleDaemon === 'stop' ? path.join(config.root, '.devfleet', 'gradle-daemons') : null;
+  let daemonStop: Promise<void> | null = null;
   /** Automatic restarts in progress, so a restart or stop request can cancel them */
   const autoRestarts = new Map<string, { cancel: AbortController; done: Promise<void> }>();
   let resolveAllExited!: () => void;
@@ -491,12 +497,15 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   async function buildService(name: string, mark: boolean): Promise<boolean> {
     const svc = service(name);
     const build = svc.build!;
+    pendingBuilds += 1;
     await buildSlot();
     try {
+      if (daemonStop) await daemonStop; // don't hand the build a daemon that is shutting down
       if (stopping) return false;
       let env: NodeJS.ProcessEnv;
       try {
         env = serviceEnv(name);
+        if (daemonDir) env = withDaemonRegistry(env, daemonDir);
       } catch (err) {
         logger.error(name, (err as Error).message);
         return false;
@@ -531,7 +540,28 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       return true;
     } finally {
       releaseBuildSlot();
+      pendingBuilds -= 1;
+      // Wait a tick: the next build in a restart is asked for right after this one finishes.
+      if (pendingBuilds === 0) setTimeout(() => void stopBuildDaemons(), 0);
     }
+  }
+
+  /** Stops the Gradle daemons the builds started, once no build is running or waiting (gradle_daemon: stop). */
+  function stopBuildDaemons({ force = false, shutdown = false } = {}): Promise<void> {
+    if (!daemonDir) return Promise.resolve();
+    if (daemonStop) return daemonStop;
+    if (!shutdown && (pendingBuilds || stopping)) return Promise.resolve();
+    daemonStop = (async () => {
+      const pids = await stopDaemons(daemonDir, { force });
+      if (pids.length) {
+        const which = pids.length === 1 ? 'the Gradle daemon' : `${pids.length} Gradle daemons`;
+        const them = pids.length === 1 ? 'it' : 'them';
+        logger.system(`stopped ${which} the builds used (PID ${pids.join(', ')}) to free memory; set gradle_daemon: keep to keep ${them}`);
+      }
+    })().finally(() => {
+      daemonStop = null;
+    });
+    return daemonStop;
   }
 
   function ensure(name: string): Promise<boolean> {
@@ -627,6 +657,9 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       } else if (infraStarted) {
         logger.info(INFRA, 'leaving infra containers running (stop them with: devfleet down)');
       }
+      // Builds cut short by the shutdown leave their daemon behind too.
+      await daemonStop;
+      await stopBuildDaemons({ force, shutdown: true });
       await logger.close();
       resolveAllExited();
     })();

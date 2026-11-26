@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { findCycle } from './graph.ts';
-import { isRecord, type Build, type Config, type Health, type Infra, type RestartPolicy, type Service } from './types.ts';
+import { isRecord, type Build, type Config, type GradleDaemonPolicy, type Health, type Infra, type RestartPolicy, type Service } from './types.ts';
 
 export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'] as const;
 const DEFAULT_HEALTH_TIMEOUT = 180;
@@ -147,6 +147,7 @@ export function normalizeConfig(raw: unknown, root: string): Config {
     infra,
     logDir: path.resolve(root, String(data.log_dir ?? '.devfleet/logs')),
     buildConcurrency: normalizeCount(data.build_concurrency, 'build_concurrency', 1, errors) || 1,
+    gradleDaemon: normalizeGradleDaemon(data.gradle_daemon, errors),
     errors,
   };
 }
@@ -202,6 +203,13 @@ function normalizeRestart(value: unknown, label: string, fallback: RestartPolicy
   if (value === 'on-failure') return 'on-failure';
   errors.push(`${label} must be "no" or "on-failure".`);
   return fallback;
+}
+
+function normalizeGradleDaemon(value: unknown, errors: string[]): GradleDaemonPolicy {
+  if (value == null || value === 'stop') return 'stop';
+  if (value === 'keep') return 'keep';
+  errors.push('gradle_daemon must be "stop" or "keep".');
+  return 'stop';
 }
 
 function normalizeCount(value: unknown, label: string, fallback: number, errors: string[]): number {

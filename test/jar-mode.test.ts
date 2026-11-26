@@ -228,3 +228,85 @@ test('build: false(--no-build)면 빌드 없이 이미 있는 jar를 실행하�
     await fleet.stop();
   }
 });
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const daemonPids = (root: string) => buildLog(root).flatMap((l) => (/^daemon (\d+)$/.exec(l) ? [Number(/\d+/.exec(l)![0])] : []));
+async function eventually(check: () => boolean, ms = 8000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (check()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return check();
+}
+
+test('gradle_daemon은 "stop"(기본값) 또는 "keep"', () => {
+  assert.equal(normalizeConfig({ services: { a: { cmd: 'x' } } }, '/p').gradleDaemon, 'stop');
+  assert.equal(normalizeConfig({ gradle_daemon: 'keep', services: { a: { cmd: 'x' } } }, '/p').gradleDaemon, 'keep');
+  assert.deepEqual(normalizeConfig({ gradle_daemon: 'never', services: { a: { cmd: 'x' } } }, '/p').errors, [
+    'gradle_daemon must be "stop" or "keep".',
+  ]);
+});
+
+test('빌드가 끝나면 빌드가 띄운 Gradle 데몬만 멈추고, restart로 다시 빌드한 뒤에도 멈춘다', { skip }, async () => {
+  const [pa, pb] = await Promise.all([freePort(), freePort()]);
+  const root = tempDir();
+  // 레지스트리에 남은 옛 로그의 PID가 지금은 다른 프로세스(이 테스트)일 수 있다. 그런 프로세스는 건드리지 않는다.
+  const registry = path.join(root, '.devfleet', 'gradle-daemons', '9.9');
+  fs.mkdirSync(registry, { recursive: true });
+  fs.writeFileSync(path.join(registry, `daemon-${process.pid}.out.log`), 'stale');
+  const { config, out, output } = setup(
+    {
+      env: { JAVA_HOME: fakeJavaHome(), GRADLE_OPTS: '-Xmx64m' },
+      services: {
+        a: { build: build('a', root, '--daemon'), jar: 'build/libs/*.jar', java_opts: `--port=${pa}`, port: pa },
+        b: { build: build('b', root, '--daemon'), jar: 'build/libs/*.jar', java_opts: `--port=${pb}`, port: pb },
+      },
+    },
+    root,
+  );
+  const fleet = startFleet(config, [], { out, color: false });
+  try {
+    await fleet.ready;
+    const [first, reused] = daemonPids(root);
+    assert.ok(first, '빌드가 GRADLE_OPTS로 받은 레지스트리에 데몬을 띄웠다');
+    assert.equal(reused, first, '두 번째 빌드는 같은 데몬을 다시 쓴다');
+    assert.ok(await eventually(() => !alive(first)), '빌드가 끝나면 데몬을 멈춘다');
+    assert.ok(await eventually(() => /stopped the Gradle daemon the builds used \(PID \d+\)/.test(output())));
+    assert.doesNotMatch(output(), new RegExp(`PID [\\d, ]*\\b${process.pid}\\b`));
+
+    assert.deepEqual(await fleet.restart(['a']), { ok: true });
+    const again = daemonPids(root)[2]!;
+    assert.notEqual(again, first);
+    assert.ok(await eventually(() => !alive(again)), 'restart의 빌드가 띄운 데몬도 멈춘다');
+  } finally {
+    await fleet.stop();
+  }
+});
+
+test('gradle_daemon: keep이면 빌드에 레지스트리를 주지 않아 평소 데몬을 그대로 쓴다', { skip }, async () => {
+  const port = await freePort();
+  const root = tempDir();
+  const { config, out } = setup(
+    {
+      gradle_daemon: 'keep',
+      env: { JAVA_HOME: fakeJavaHome() },
+      services: { a: { build: build('a', root, '--daemon'), jar: 'build/libs/*.jar', java_opts: `--port=${port}`, port } },
+    },
+    root,
+  );
+  const fleet = startFleet(config, [], { out, color: false, quiet: true });
+  try {
+    await fleet.ready;
+    assert.ok(buildLog(root).includes('daemon none'));
+  } finally {
+    await fleet.stop();
+  }
+});

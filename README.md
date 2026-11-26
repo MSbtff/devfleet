@@ -221,7 +221,7 @@ services:
     dir: AccountService
     build: ./gradlew bootJar          # runs before the service starts
     jar: build/libs/*.jar             # relative to dir; the newest match wins, *-plain.jar is skipped
-    java_opts: -Xmx512m               # optional, placed before -jar
+    java_opts: -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1   # optional, placed before -jar
     port: 7071
 
   menus-service:                      # a module of a multi-module build
@@ -232,11 +232,13 @@ services:
     jar: build/libs/*.jar
 ```
 
-- **One build at a time.** Builds start right away in start order, while infra and dependencies are still coming up, but only one runs at a time (`build_concurrency`, default 1). Gradle then reuses one daemon for the builds (when the projects use the same Gradle version and JVM) instead of keeping one busy per service, and the daemon goes idle once the builds are done. Raise `build_concurrency` to build faster with more daemons.
+- **One build at a time.** Builds start right away in start order, while infra and dependencies are still coming up, but only one runs at a time (`build_concurrency`, default 1). Gradle then reuses one daemon for the builds (when the projects use the same Gradle version and JVM) instead of keeping one busy per service. Raise `build_concurrency` to build faster with more daemons.
+- **The build daemon is stopped when the builds are done.** An idle Gradle daemon stays in memory for three hours, so once no build is running or waiting, devfleet stops the daemons its builds used (about 0.6 GB each even for a small project). Builds get their own daemon registry under `.devfleet/gradle-daemons` through `GRADLE_OPTS`, so the daemons your IDE or a `bootRun` service uses are never shared with them and never stopped. The cost is a cold daemon on each `devfleet restart` build; set `gradle_daemon: keep` at the top level to keep the daemon instead.
 - **`devfleet restart` rebuilds first.** Edit the code, run `devfleet restart account-service`, and devfleet builds the new jar while the old one keeps serving, then swaps them. If the build fails, the running process is left alone. `devfleet restart --no-build` restarts without building, and `devfleet up --no-build` starts from the jars built last time. Automatic restarts after a crash never rebuild.
 - **A copy runs, not the build output.** devfleet copies the jar to `.devfleet/jars/<service>.jar` and runs that, so a build can overwrite `build/libs` while the service is running.
 - **Java comes from `JAVA_HOME`** when it is set (in your shell, `env`, or `env_file`), otherwise from `PATH`.
 - `build` works without `jar` too: any service can run a build command before its `cmd`.
+- **The apps are what is left.** With the daemons gone, the application JVMs take most of the memory. For local runs, `java_opts: -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1` caps the heap, uses the smallest garbage collector, and skips the optimizing JIT, which usually also makes startup faster. If your build uses Kotlin, `kotlin.compiler.execution.strategy=in-process` in `gradle.properties` keeps the Kotlin compiler from starting a daemon of its own.
 
 ### Notes for Gradle `bootRun`
 

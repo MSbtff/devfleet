@@ -381,8 +381,10 @@ export function renderConfig(project: DetectedProject): string {
   if (project.jar) {
     lines.push(
       '# Jar mode: each app is built once and run with java -jar, so no Gradle daemon stays busy per app.',
-      '# Builds run one at a time and reuse one daemon; `devfleet restart <name>` rebuilds before restarting.',
+      '# Builds run one at a time and reuse one daemon, which is stopped once the builds are done.',
+      '# `devfleet restart <name>` rebuilds before restarting.',
       '# build_concurrency: 2   # build several apps at once (faster, but one daemon each)',
+      '# gradle_daemon: keep    # keep the build daemon after builds (faster rebuilds, more memory)',
       '',
     );
   }
@@ -400,7 +402,7 @@ export function renderConfig(project: DetectedProject): string {
       } else {
         lines.push('    build:', `      cmd: ${scalar(app.build.cmd)}`, `      dir: ${scalar(path.relative(project.root, app.build.dir) || '.')}`);
       }
-      lines.push(`    jar: ${scalar(app.jar)}`, '    # java_opts: -Xmx512m');
+      lines.push(`    jar: ${scalar(app.jar)}`, '    # java_opts: -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1   # less memory, faster startup');
     } else {
       lines.push(`    cmd: ${scalar(app.cmd)}`);
     }

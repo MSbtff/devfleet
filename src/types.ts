@@ -36,6 +36,8 @@ export interface Service {
   maxRestarts: number;
 }
 
+export type GradleDaemonPolicy = 'stop' | 'keep';
+
 export type RestartPolicy = 'no' | 'on-failure';
 
 export interface Infra {
@@ -57,6 +59,8 @@ export interface Config {
   logDir: string;
   /** How many builds may run at the same time */
   buildConcurrency: number;
+  /** Whether to stop the Gradle daemons builds started once the builds are done */
+  gradleDaemon: GradleDaemonPolicy;
   errors: string[];
 }
 
