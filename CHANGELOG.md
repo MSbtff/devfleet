@@ -17,6 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `devfleet restart` rebuilds services that have a `build` before stopping them, and leaves the running process alone when the build fails. `devfleet restart --no-build` and `devfleet up --no-build` skip builds.
 - Once no build is running or waiting, devfleet stops the Gradle daemons its builds used instead of leaving them idle in memory for three hours. Builds use their own daemon registry under `.devfleet/gradle-daemons`, so daemons used by an IDE or a `bootRun` service are not touched. `gradle_daemon: keep` turns this off.
 - The jar copy in `.devfleet/jars` is a copy-on-write clone where the file system supports it (APFS, btrfs, XFS), so it takes no extra disk space.
+- When `java` is OpenJ9 (IBM Semeru), jar services get `-Xshareclasses` with one class cache in `.devfleet/j9cache` shared by all of them, plus `-Xtune:virtualized`, unless `java_opts` set their own. In a 9-service project this cut Java memory from 3.3 GB to 1.7 GB.
 - `devfleet up` warns when many jar services run without a heap limit for the machine's memory, since each JVM may otherwise grow to a quarter of it.
 
 ## [0.2.0] - 2026-11-20

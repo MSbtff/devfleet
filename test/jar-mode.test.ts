@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeConfig } from '../src/config.ts';
-import { findJar, startFleet } from '../src/runner.ts';
+import { findJar, openJ9Options, startFleet } from '../src/runner.ts';
 import { parseElapsed, stopDaemons, withDaemonRegistry } from '../src/gradle.ts';
 import { spawn } from 'node:child_process';
 import { isPortOpen } from '../src/ports.ts';
@@ -19,11 +19,12 @@ const build = (name: string, root: string, extra = '') =>
     path.join(root, 'builds.log'),
   )} ${extra}`;
 
-function fakeJavaHome(): string {
+function fakeJavaHome(vm = 'OpenJDK 64-Bit Server VM'): string {
   const home = tempDir('devfleet-java-');
   fs.mkdirSync(path.join(home, 'bin'));
   const java = path.join(home, 'bin', 'java');
-  fs.writeFileSync(java, `#!/bin/sh\necho "java $*"\nexec ${node} ${JSON.stringify(FAKE)} "$@"\n`);
+  const version = `if [ "$1" = "-version" ]; then echo 'openjdk version "21"' >&2; echo '${vm}' >&2; exit 0; fi\n`;
+  fs.writeFileSync(java, `#!/bin/sh\n${version}echo "java $*"\nexec ${node} ${JSON.stringify(FAKE)} "$@"\n`);
   fs.chmodSync(java, 0o755);
   return home;
 }
@@ -457,4 +458,52 @@ test('최상위 java_opts는 모든 서비스 앞에 붙고, 서비스 값이 �
     'java_opts must be a string of JVM options, e.g. "-Xmx256m -XX:+UseSerialGC".',
     'a: java_opts must be a string of JVM options, e.g. "-Xmx256m -XX:+UseSerialGC".',
   ]);
+});
+
+test('OpenJ9면 클래스 캐시 공유와 -Xtune:virtualized를 붙이고, HotSpot이면 붙이지 않는다', { skip }, async () => {
+  const [pa, pb] = await Promise.all([freePort(), freePort()]);
+  const root = tempDir();
+  const { config, out, output } = setup(
+    {
+      env: { JAVA_HOME: fakeJavaHome('Eclipse OpenJ9 VM 21.0.13.0') },
+      services: {
+        a: { build: build('a', root), jar: 'build/libs/a-*.jar', java_opts: `--port=${pa}`, port: pa },
+        b: { build: build('b', root), jar: 'build/libs/b-*.jar', java_opts: `-Xshareclasses:none --port=${pb}`, port: pb },
+      },
+    },
+    root,
+  );
+  const fleet = startFleet(config, [], { out, color: false });
+  try {
+    const rows = await fleet.ready;
+    assert.deepEqual(rows.map((r) => r.status), ['ready', 'ready']);
+    const cache = path.join(root, '.devfleet', 'j9cache');
+    const log = output();
+    assert.ok(log.includes(`java -Xshareclasses:name=devfleet,cacheDir=${cache},nonfatal -Xtune:virtualized --port=${pa} -jar`));
+    assert.ok(log.includes(`java -Xtune:virtualized -Xshareclasses:none --port=${pb} -jar`), '직접 준 -Xshareclasses는 그대로 둔다');
+    assert.equal(log.match(/OpenJ9: added/g)?.length, 1, '안내는 한 번만');
+  } finally {
+    await fleet.stop();
+  }
+
+  const port = await freePort();
+  const hotspot = setup(
+    { env: { JAVA_HOME: fakeJavaHome() }, services: { a: { build: build('a', root), jar: 'build/libs/a-*.jar', java_opts: `--port=${port}`, port } } },
+    root,
+  );
+  const other = startFleet(hotspot.config, [], { out: hotspot.out, color: false });
+  try {
+    await other.ready;
+    assert.match(hotspot.output(), new RegExp(`java --port=${port} -jar`));
+    assert.doesNotMatch(hotspot.output(), /Xshareclasses|OpenJ9/);
+  } finally {
+    await other.stop();
+  }
+});
+
+test('openJ9Options: 사용자가 정한 값은 건드리지 않고, 쉼표가 든 경로에는 캐시를 쓰지 않는다', () => {
+  assert.deepEqual(openJ9Options('', '/p/.devfleet/j9cache'), ['-Xshareclasses:name=devfleet,cacheDir=/p/.devfleet/j9cache,nonfatal', '-Xtune:virtualized']);
+  assert.deepEqual(openJ9Options('-Xtune:throughput', '/p/c'), ['-Xshareclasses:name=devfleet,cacheDir=/p/c,nonfatal']);
+  assert.deepEqual(openJ9Options('-Xshareclasses:none -Xtune:virtualized', '/p/c'), []);
+  assert.deepEqual(openJ9Options('', '/a,b/c'), ['-Xtune:virtualized']);
 });

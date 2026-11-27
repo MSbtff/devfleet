@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { readEnvFile } from './config.ts';
 import { resolveTargets, waves } from './graph.ts';
 import { isPortOpen, findListeners, describeListeners } from './ports.ts';
@@ -198,9 +198,36 @@ function shellQuote(arg: string): string {
   return /^[A-Za-z0-9_./:=-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
-function javaCommand(env: NodeJS.ProcessEnv, javaOpts: string, jar: string): string {
-  const java = env.JAVA_HOME ? path.join(env.JAVA_HOME, 'bin', 'java') : 'java';
-  return [shellQuote(java), javaOpts.trim(), '-jar', shellQuote(jar)].filter(Boolean).join(' ');
+function javaPath(env: NodeJS.ProcessEnv): string {
+  return env.JAVA_HOME ? path.join(env.JAVA_HOME, 'bin', 'java') : 'java';
+}
+
+function javaCommand(env: NodeJS.ProcessEnv, javaOpts: string, jar: string, extra: readonly string[] = []): string {
+  return [shellQuote(javaPath(env)), ...extra.map(shellQuote), javaOpts.trim(), '-jar', shellQuote(jar)].filter(Boolean).join(' ');
+}
+
+const openJ9Checks = new Map<string, Promise<boolean>>();
+
+export function isOpenJ9(java: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  let check = openJ9Checks.get(java);
+  if (!check) {
+    check = new Promise((resolve) => {
+      execFile(java, ['-version'], { env, timeout: 10_000, windowsHide: true }, (err, stdout, stderr) =>
+        resolve(!err && /OpenJ9/.test(`${stdout}${stderr}`)),
+      );
+    });
+    openJ9Checks.set(java, check);
+  }
+  return check;
+}
+
+export function openJ9Options(javaOpts: string, cacheDir: string): string[] {
+  const options: string[] = [];
+  if (!/(?:^|\s)-Xshareclasses/.test(javaOpts) && !cacheDir.includes(',')) {
+    options.push(`-Xshareclasses:name=devfleet,cacheDir=${cacheDir},nonfatal`);
+  }
+  if (!/(?:^|\s)-Xtune:/.test(javaOpts)) options.push('-Xtune:virtualized');
+  return options;
 }
 
 const HEAP_LIMIT = /(?:^|\s)(?:-Xmx\S|-XX:MaxHeapSize=|-XX:MaxRAM=|-XX:MaxRAMPercentage=)/;
@@ -277,6 +304,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   let daemonStop: Promise<void> | null = null;
   const startupBuilds = new Map<string, { promise: Promise<boolean>; cancel: () => void }>();
   let forcing = false;
+  let openJ9Noted = false;
   const autoRestarts = new Map<string, { cancel: AbortController; done: Promise<void> }>();
   let resolveAllExited!: () => void;
   const allExited = new Promise<void>((resolve) => (resolveAllExited = resolve));
@@ -406,7 +434,20 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         logger.error(name, `could not copy ${displayPath(config.root, jar)}: ${(err as Error).message}`);
         return false;
       }
-      cmd = javaCommand(env, svc.javaOpts, runJar);
+      let extra: string[] = [];
+      if (await isOpenJ9(javaPath(env), env)) {
+        extra = openJ9Options(svc.javaOpts, path.join(config.root, '.devfleet', 'j9cache'));
+        if (extra.length && !openJ9Noted) {
+          openJ9Noted = true;
+          const added = extra.map((o) => (o.startsWith('-Xshareclasses') ? '-Xshareclasses (one class cache in .devfleet/j9cache for all services)' : o));
+          logger.system(`OpenJ9: added ${added.join(' and ')}; set your own in java_opts to change them`);
+        }
+      }
+      if (stopping) {
+        set(name, { status: 'skipped' });
+        return false;
+      }
+      cmd = javaCommand(env, svc.javaOpts, runJar, extra);
       logger.info(name, `running ${displayPath(config.root, jar)} as ${displayPath(config.root, runJar)}`);
     }
 
