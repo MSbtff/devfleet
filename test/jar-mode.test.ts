@@ -5,8 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeConfig } from '../src/config.ts';
 import { findJar, startFleet } from '../src/runner.ts';
+import { parseElapsed, stopDaemons, withDaemonRegistry } from '../src/gradle.ts';
+import { spawn } from 'node:child_process';
 import { isPortOpen } from '../src/ports.ts';
-import { FAKE, freePort, setup, tempDir } from './helpers.ts';
+import { FAKE, fake, freePort, setup, sleep, tempDir } from './helpers.ts';
 
 const FAKE_BUILD = fileURLToPath(new URL('./fixtures/fake-build.ts', import.meta.url));
 const node = JSON.stringify(process.execPath);
@@ -308,5 +310,118 @@ test('gradle_daemon: keep이면 빌드에 레지스트리를 주지 않아 평�
     assert.ok(buildLog(root).includes('daemon none'));
   } finally {
     await fleet.stop();
+  }
+});
+
+test('빌드는 설정 파일 순서가 아니라 의존 순서로 슬롯을 잡는다', { skip }, async () => {
+  const [pa, pb] = await Promise.all([freePort(), freePort()]);
+  const root = tempDir();
+  const { config, out } = setup(
+    {
+      env: { JAVA_HOME: fakeJavaHome() },
+      services: {
+        b: { build: build('b', root), jar: 'build/libs/b-*.jar', java_opts: `--port=${pb}`, port: pb, depends_on: ['a'] },
+        a: { build: build('a', root), jar: 'build/libs/a-*.jar', java_opts: `--port=${pa}`, port: pa },
+      },
+    },
+    root,
+  );
+  const fleet = startFleet(config, [], { out, color: false, quiet: true });
+  try {
+    await fleet.ready;
+    assert.deepEqual(buildLog(root), ['start a', 'end a', 'start b', 'end b']);
+  } finally {
+    await fleet.stop();
+  }
+});
+
+test('의존 서비스가 실패하면 아직 시작하지 않은 빌드는 취소한다', { skip }, async () => {
+  const root = tempDir();
+  fs.writeFileSync(path.join(root, 'broken'), '');
+  const { config, out, output } = setup(
+    {
+      env: { JAVA_HOME: fakeJavaHome() },
+      services: {
+        a: { build: build('a', root, `--fail-if=${path.join(root, 'broken')}`), jar: 'build/libs/a-*.jar', port: await freePort() },
+        b: { build: build('b', root), jar: 'build/libs/b-*.jar', port: await freePort(), depends_on: ['a'] },
+      },
+    },
+    root,
+  );
+  const fleet = startFleet(config, [], { out, color: false, quiet: true });
+  try {
+    const rows = await fleet.ready;
+    assert.deepEqual(rows.map((r) => r.status), ['failed', 'skipped']);
+    await sleep(300);
+    assert.deepEqual(buildLog(root), ['start a', 'fail a'], 'b의 빌드는 돌지 않는다');
+    assert.doesNotMatch(output(), /b building/);
+  } finally {
+    await fleet.stop();
+  }
+});
+
+test('이미 떠 있는 서비스(IDE 등)는 빌드하지 않고 그대로 쓴다', { skip }, async () => {
+  const port = await freePort();
+  const root = tempDir();
+  const running = spawn(fake(`--port=${port}`), { shell: true, detached: true, stdio: 'ignore' });
+  const { config, out, output } = setup(
+    { env: { JAVA_HOME: fakeJavaHome() }, services: { a: { build: build('a', root), jar: 'build/libs/*.jar', port } } },
+    root,
+  );
+  try {
+    for (let i = 0; i < 100 && !(await isPortOpen(port)); i++) await sleep(50);
+    const fleet = startFleet(config, [], { out, color: false, quiet: true });
+    try {
+      const rows = await fleet.ready;
+      assert.equal(rows[0]?.status, 'external');
+      assert.deepEqual(buildLog(root), []);
+      assert.match(output(), /a already running on port \d+; skipping the build/);
+    } finally {
+      await fleet.stop();
+    }
+  } finally {
+    process.kill(-running.pid!, 'SIGKILL');
+  }
+});
+
+test('GRADLE_OPTS: 기존 값 뒤에 붙이고, 셸에 특별한 문자는 백슬래시로 이스케이프한다', { skip }, () => {
+  assert.deepEqual(withDaemonRegistry({ GRADLE_OPTS: '-Xmx64m' }, '/p/.devfleet/gradle-daemons').GRADLE_OPTS,
+    '-Xmx64m -Dorg.gradle.daemon.registry.base=/p/.devfleet/gradle-daemons');
+  assert.equal(withDaemonRegistry({}, `/a b/it's $x`).GRADLE_OPTS, "-Dorg.gradle.daemon.registry.base=/a\\ b/it\\'s\\ \\$x");
+});
+
+test('parseElapsed: ps의 [[dd-]hh:]mm:ss', () => {
+  assert.equal(parseElapsed('00:07'), 7);
+  assert.equal(parseElapsed('12:34'), 754);
+  assert.equal(parseElapsed('01:02:03'), 3723);
+  assert.equal(parseElapsed('2-01:00:00'), 2 * 86400 + 3600);
+  assert.equal(parseElapsed('soon'), null);
+});
+
+test('stopDaemons: 로그보다 늦게 시작한 프로세스는 PID가 재사용된 것이므로 GradleDaemon이어도 멈추지 않는다', { skip }, async () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, '9.9'));
+  const spawnDaemon = () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)', 'GradleDaemon'], { stdio: 'ignore' });
+    return child;
+  };
+  const ours = spawnDaemon();
+  const other = spawnDaemon(); // 예: IDE의 데몬이 옛 로그의 PID를 물려받았다
+  try {
+    await sleep(200);
+    fs.writeFileSync(path.join(dir, '9.9', `daemon-${ours.pid}.out.log`), 'live');
+    const old = path.join(dir, '9.9', `daemon-${other.pid}.out.log`);
+    fs.writeFileSync(old, 'old');
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(old, past, past);
+    fs.writeFileSync(path.join(dir, '9.9', 'daemon-999999.out.log'), 'gone'); // 끝난 데몬
+
+    assert.deepEqual(await stopDaemons(dir), [ours.pid]);
+    assert.equal(alive(ours.pid!), false);
+    assert.equal(alive(other.pid!), true);
+    assert.deepEqual(fs.readdirSync(path.join(dir, '9.9')), [], '쓸모없는 로그는 지운다');
+  } finally {
+    ours.kill('SIGKILL');
+    other.kill('SIGKILL');
   }
 });

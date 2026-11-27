@@ -29,6 +29,7 @@ export class Logger {
   private readonly files = new Map<string, fs.WriteStream>();
   private readonly tails = new Map<string, string[]>();
   private readonly listeners = new Set<(text: string) => void>();
+  private closed = false;
 
   constructor({ out = process.stdout, color, names = [], logDir = null, quiet = false, only = null }: LoggerOptions = {}) {
     this.out = out;
@@ -59,6 +60,7 @@ export class Logger {
     let stream = this.files.get(name);
     if (!stream) {
       stream = fs.createWriteStream(file, { flags: 'w' });
+      stream.on('error', () => {}); // a log file that can't be written must not take devfleet down
       this.files.set(name, stream);
     }
     return stream;
@@ -66,7 +68,8 @@ export class Logger {
 
   /** One line of process output. Always written to the file; shown on screen depending on options. */
   line(name: string, text: string): void {
-    this.file(name)?.write(`${text}\n`);
+    // Output can still arrive while shutting down; after close() it only goes to the screen.
+    if (!this.closed) this.file(name)?.write(`${text}\n`);
     const tail = this.tails.get(name) ?? [];
     tail.push(text);
     if (tail.length > TAIL_LINES) tail.shift();
@@ -127,6 +130,7 @@ export class Logger {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     await Promise.all([...this.files.values()].map((f) => new Promise<void>((resolve) => f.end(resolve))));
   }
 }

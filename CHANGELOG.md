@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `devfleet stop` and `devfleet restart` cancel a pending automatic restart and take over.
 - `devfleet status` shows how many times the running `devfleet up` restarted each service.
 - Jar mode: `build`, `jar`, and `java_opts` per service. devfleet runs the build before starting the service, then runs a copy of the newest matching jar (skipping `*-plain.jar`) with `java -jar`, using `JAVA_HOME` when it is set. `build` also works on its own before any `cmd`, and takes `{ cmd, dir }` to build a module from the root project.
-- Builds run one at a time by default (`build_concurrency`), so Gradle reuses one daemon. They start right away in start order while dependencies are still coming up.
+- Builds run one at a time by default (`build_concurrency`), so Gradle reuses one daemon. They start right away in dependency order, alongside the infra, and are cancelled when a dependency fails. A service that is already running is reused without building it.
 - `devfleet init --jar` generates jar-mode settings for Gradle (`bootJar`) and Maven (`package`) apps, including multi-module projects.
 - `devfleet restart` rebuilds services that have a `build` before stopping them, and leaves the running process alone when the build fails. `devfleet restart --no-build` and `devfleet up --no-build` skip builds.
 - Once no build is running or waiting, devfleet stops the Gradle daemons its builds used instead of leaving them idle in memory for three hours. Builds use their own daemon registry under `.devfleet/gradle-daemons`, so daemons used by an IDE or a `bootRun` service are not touched. `gradle_daemon: keep` turns this off.

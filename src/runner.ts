@@ -283,6 +283,10 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   /** Builds use their own Gradle daemon registry here, so their daemons can be stopped once the builds are done. */
   const daemonDir = config.gradleDaemon === 'stop' ? path.join(config.root, '.devfleet', 'gradle-daemons') : null;
   let daemonStop: Promise<void> | null = null;
+  /** Builds started for `up`, so a service skipped before its build runs can cancel it */
+  const startupBuilds = new Map<string, { promise: Promise<boolean>; cancel: () => void }>();
+  /** A second Ctrl+C arrived while shutting down */
+  let forcing = false;
   /** Automatic restarts in progress, so a restart or stop request can cancel them */
   const autoRestarts = new Map<string, { cancel: AbortController; done: Promise<void> }>();
   let resolveAllExited!: () => void;
@@ -494,14 +498,29 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
    * one daemon is reused instead of each service keeping its own.
    * `mark` shows the service as building; a restart leaves the running service's status alone.
    */
-  async function buildService(name: string, mark: boolean): Promise<boolean> {
+  interface BuildToken {
+    cancelled: boolean;
+    child: ChildProcess | null;
+  }
+
+  /**
+   * `startup`: the build for `up`. It shows the service as building, can be cancelled through `token`,
+   * and is skipped when the service is already running (an IDE, say), since launch() reuses it then.
+   * A restart's build leaves the running service's status alone.
+   */
+  async function buildService(name: string, { startup = false, token }: { startup?: boolean; token?: BuildToken } = {}): Promise<boolean> {
     const svc = service(name);
     const build = svc.build!;
     pendingBuilds += 1;
     await buildSlot();
     try {
       if (daemonStop) await daemonStop; // don't hand the build a daemon that is shutting down
-      if (stopping) return false;
+      if (stopping || token?.cancelled) return false;
+      if (startup && svc.port && (await isPortOpen(svc.port)) && (await checkOnce(svc.health))) {
+        logger.info(name, `already running on port ${svc.port}; skipping the build`);
+        return true;
+      }
+      if (stopping || token?.cancelled) return false;
       let env: NodeJS.ProcessEnv;
       try {
         env = serviceEnv(name);
@@ -514,7 +533,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         logger.error(name, `build directory not found: ${build.dir}`);
         return false;
       }
-      if (mark && state.get(name)?.status === 'waiting') set(name, { status: 'building' });
+      if (startup && state.get(name)?.status === 'waiting') set(name, { status: 'building' });
       logger.info(name, `building: ${build.cmd}  (${displayPath(config.root, build.dir)})`);
       const startedAt = Date.now();
       const child = spawn(build.cmd, {
@@ -525,12 +544,14 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       builds.add(child);
+      if (token) token.child = child;
       logger.attach(name, child.stdout);
       logger.attach(name, child.stderr);
       const code = await waitForExit(child);
       builds.delete(child);
+      if (token) token.child = null;
       if (state.get(name)?.status === 'building') set(name, { status: 'waiting' });
-      if (stopping) return false;
+      if (stopping || token?.cancelled) return false;
       if (code !== 0) {
         logger.error(name, `build failed (${code === -1 ? 'could not run it' : `code ${code}`})`);
         logger.dumpTail(name);
@@ -549,9 +570,9 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   /** Stops the Gradle daemons the builds started, once no build is running or waiting (gradle_daemon: stop). */
   function stopBuildDaemons({ force = false, shutdown = false } = {}): Promise<void> {
     if (!daemonDir) return Promise.resolve();
-    if (daemonStop) return daemonStop;
+    if (daemonStop && !(force && shutdown)) return daemonStop;
     if (!shutdown && (pendingBuilds || stopping)) return Promise.resolve();
-    daemonStop = (async () => {
+    const current: Promise<void> = (async () => {
       const pids = await stopDaemons(daemonDir, { force });
       if (pids.length) {
         const which = pids.length === 1 ? 'the Gradle daemon' : `${pids.length} Gradle daemons`;
@@ -559,9 +580,27 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         logger.system(`stopped ${which} the builds used (PID ${pids.join(', ')}) to free memory; set gradle_daemon: keep to keep ${them}`);
       }
     })().finally(() => {
-      daemonStop = null;
+      if (daemonStop === current) daemonStop = null;
     });
-    return daemonStop;
+    daemonStop = current;
+    return current;
+  }
+
+  /** Starts the `up` build of a service; builds take slots in the order they are started. */
+  function startBuild(name: string): void {
+    const token: BuildToken = { cancelled: false, child: null };
+    const promise = buildService(name, { startup: true, token });
+    startupBuilds.set(name, {
+      promise,
+      cancel: () => {
+        if (token.cancelled) return;
+        token.cancelled = true;
+        if (token.child) {
+          logger.info(name, 'cancelling the build');
+          killGroup(token.child, 'SIGINT');
+        }
+      },
+    });
   }
 
   function ensure(name: string): Promise<boolean> {
@@ -570,9 +609,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       promise = (async () => {
         if (!plan.targets.includes(name)) return waitExternal(name);
         const svc = service(name);
-        set(name, { status: 'waiting' });
-        // Builds start right away, in start order, while dependencies are still coming up.
-        const built = buildFirst && svc.build ? buildService(name, true) : Promise.resolve(true);
+        const build = startupBuilds.get(name);
         const results = await Promise.all(svc.dependsOn.map(ensure));
         if (stopping) {
           set(name, { status: 'skipped' });
@@ -580,11 +617,12 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         }
         const failed = svc.dependsOn.filter((_, i) => !results[i]);
         if (failed.length) {
+          build?.cancel(); // its build would only finish after `up` is done, for nothing
           set(name, { status: 'skipped' });
           logger.warn(name, `skipped: dependencies are not ready (${failed.join(', ')})`);
           return false;
         }
-        if (!(await built)) {
+        if (build && !(await build.promise)) {
           set(name, { status: 'failed' });
           return false;
         }
@@ -625,25 +663,49 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       const listeners = await findListeners(svc.port);
       for (const l of listeners) {
         logger.info(name, `stopping PID ${l.pid} (${l.command}) left on port ${svc.port} (e.g. a JVM forked by the Gradle daemon)`);
-        killPid(l.pid, force ? 'SIGKILL' : 'SIGTERM');
+        killPid(l.pid, force || forcing ? 'SIGKILL' : 'SIGTERM');
       }
-      if (!force && listeners.length && !(await waitPortClosed(svc.port, 10_000))) {
+      if (!(force || forcing) && listeners.length && !(await waitPortClosed(svc.port, 10_000))) {
         for (const l of listeners) killPid(l.pid, 'SIGKILL');
       }
     }
     set(name, { status: 'stopped' });
   }
 
+  /** Waits for a build cut short by the shutdown to exit, escalating like a service stop. */
+  async function stopBuild(child: ChildProcess): Promise<void> {
+    if (await waitGroupExit(child, 10_000)) return;
+    killGroup(child, 'SIGTERM');
+    if (!(await waitGroupExit(child, 5000))) killGroup(child, 'SIGKILL');
+    await waitGroupExit(child, 3000);
+  }
+
+  /** A second Ctrl+C during a shutdown: kill what is left now instead of starting the shutdown over. */
+  function forceKill(): void {
+    if (forcing) return;
+    forcing = true;
+    for (const st of state.values()) if (st.child && groupAlive(st.child)) killGroup(st.child, 'SIGKILL');
+    for (const child of builds) killGroup(child, 'SIGKILL');
+    if (daemonDir) void stopDaemons(daemonDir, { force: true });
+  }
+
   function stop({ force = false }: { force?: boolean } = {}): Promise<void> {
-    if (stopPromise && !force) return stopPromise;
+    if (stopPromise) {
+      if (force) forceKill();
+      return stopPromise;
+    }
     stopping = true;
+    forcing = force;
     abort.abort();
     if (infraChild) killGroup(infraChild, 'SIGINT');
     for (const child of builds) killGroup(child, force ? 'SIGKILL' : 'SIGINT');
+    const buildsExited = Promise.all([...builds].map(stopBuild));
     stopPromise = (async () => {
       for (const wave of [...plan.waves].reverse()) {
         await Promise.all(wave.map((name) => stopOne(name, force)));
       }
+      // Their output must be written before the log files are closed.
+      await buildsExited;
       const infraConfig = config.infra;
       if (infraStarted && infraConfig && (stopInfra || infraConfig.stopOnExit)) {
         logger.info(INFRA, 'docker compose stop');
@@ -658,8 +720,8 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         logger.info(INFRA, 'leaving infra containers running (stop them with: devfleet down)');
       }
       // Builds cut short by the shutdown leave their daemon behind too.
-      await daemonStop;
-      await stopBuildDaemons({ force, shutdown: true });
+      if (!forcing) await daemonStop;
+      await stopBuildDaemons({ force: forcing, shutdown: true });
       await logger.close();
       resolveAllExited();
     })();
@@ -796,7 +858,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       const buildFailed: string[] = [];
       if (build) {
         const toBuild = wavesOf(unique.filter((n) => service(n).build)).flat();
-        const results = await Promise.all(toBuild.map((name) => buildService(name, false)));
+        const results = await Promise.all(toBuild.map((name) => buildService(name)));
         if (stopping) return { ok: false, error: 'devfleet is shutting down' };
         toBuild.forEach((name, i) => {
           if (results[i]) return;
@@ -843,9 +905,13 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   }
 
   const ready = (async () => {
+    for (const name of plan.targets) set(name, { status: 'waiting' });
+    // Builds need neither the infra nor other services, so they start right away, in start order.
+    if (buildFirst) for (const name of plan.waves.flat()) if (service(name).build) startBuild(name);
     if (await startInfra()) {
       await Promise.all(plan.targets.map(ensure));
     } else {
+      for (const { cancel } of startupBuilds.values()) cancel();
       for (const name of plan.targets) set(name, { status: 'skipped' });
     }
     startupDone = true;
