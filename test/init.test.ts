@@ -175,4 +175,5 @@ test('init --jar: bootRun 대신 jar를 빌드하고 java -jar로 실행하는 �
   assert.equal(config.services.menus?.dir, path.join(root, 'apps/menus'));
   assert.equal(config.services['account-service']?.jar, 'build/libs/*.jar');
   assert.equal(config.services['account-service']?.cmd, '');
+  assert.equal(config.services['account-service']?.javaOpts, '-XX:TieredStopAtLevel=1', 'bootRun과 같은 JIT 설정');
 });

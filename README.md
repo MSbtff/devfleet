@@ -221,7 +221,7 @@ services:
     dir: AccountService
     build: ./gradlew bootJar          # runs before the service starts
     jar: build/libs/*.jar             # relative to dir; the newest match wins, *-plain.jar is skipped
-    java_opts: -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1   # optional, placed before -jar
+    java_opts: -XX:TieredStopAtLevel=1   # optional, placed before -jar
     port: 7071
 
   menus-service:                      # a module of a multi-module build
@@ -238,7 +238,9 @@ services:
 - **A copy runs, not the build output.** devfleet copies the jar to `.devfleet/jars/<service>.jar` and runs that, so a build can overwrite `build/libs` while the service is running.
 - **Java comes from `JAVA_HOME`** when it is set (in your shell, `env`, or `env_file`), otherwise from `PATH`.
 - `build` works without `jar` too: any service can run a build command before its `cmd`.
-- **The apps are what is left.** With the daemons gone, the application JVMs take most of the memory. For local runs, `java_opts: -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1` caps the heap, uses the smallest garbage collector, and skips the optimizing JIT, which usually also makes startup faster. If your build uses Kotlin, `kotlin.compiler.execution.strategy=in-process` in `gradle.properties` keeps the Kotlin compiler from starting a daemon of its own.
+- **Most of the memory left is the apps, so trim them with `java_opts`.** `bootRun` starts apps with `-XX:TieredStopAtLevel=1` (Spring Boot's optimized launch) and `java -jar` does not, so `init --jar` adds it to every service. Capping the heap saves far more: add `-Xmx256m -XX:+UseSerialGC` if your apps fit in that heap.
+- **Measured in the 9-service project above** (Java memory one minute after everything was ready): `bootRun` used 7.1 GB, of which 4.5 GB were Gradle daemons and wrapper clients. Jar mode used 3.8 GB, 3.5 GB with `-XX:TieredStopAtLevel=1`, and 2.6 GB with `-Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1`. After shutdown, `bootRun` left two idle daemons (0.85 GB); jar mode left nothing.
+- If your build uses Kotlin, `kotlin.compiler.execution.strategy=in-process` in `gradle.properties` keeps the Kotlin compiler from starting a daemon of its own.
 
 ### Notes for Gradle `bootRun`
 

@@ -402,7 +402,7 @@ export function renderConfig(project: DetectedProject): string {
       } else {
         lines.push('    build:', `      cmd: ${scalar(app.build.cmd)}`, `      dir: ${scalar(path.relative(project.root, app.build.dir) || '.')}`);
       }
-      lines.push(`    jar: ${scalar(app.jar)}`, '    # java_opts: -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1   # less memory, faster startup');
+      lines.push(`    jar: ${scalar(app.jar)}`, '    java_opts: -XX:TieredStopAtLevel=1   # what bootRun uses; add -Xmx256m -XX:+UseSerialGC for even less memory');
     } else {
       lines.push(`    cmd: ${scalar(app.cmd)}`);
     }
