@@ -441,3 +441,23 @@ test('heapWarning: 힙 제한 없는 jar 서비스가 메모리에 비해 많으
   assert.equal(heapWarning([...Array.from({ length: 9 }, () => jar('', { JDK_JAVA_OPTIONS: '-Xmx1g' }))], {}, 16 * GB), null);
   assert.equal(heapWarning(Array.from({ length: 9 }, () => ({ jar: null, javaOpts: '', env: {} })), {}, 16 * GB), null, 'bootRun 등 cmd 서비스는 셀 수 없다');
 });
+
+test('최상위 java_opts는 모든 서비스 앞에 붙고, 서비스 값이 뒤에 와서 이긴다. 여러 줄은 한 줄로 합친다', () => {
+  const config = normalizeConfig(
+    {
+      java_opts: '-XX:TieredStopAtLevel=1\n-Xmx256m\n',
+      services: {
+        a: { jar: 'a.jar' },
+        b: { jar: 'b.jar', java_opts: '-Xmx1g' },
+      },
+    },
+    '/p',
+  );
+  assert.deepEqual(config.errors, []);
+  assert.equal(config.services.a?.javaOpts, '-XX:TieredStopAtLevel=1 -Xmx256m');
+  assert.equal(config.services.b?.javaOpts, '-XX:TieredStopAtLevel=1 -Xmx256m -Xmx1g');
+  assert.deepEqual(normalizeConfig({ java_opts: ['-Xmx1g'], services: { a: { jar: 'a.jar', java_opts: 512 } } }, '/p').errors, [
+    'java_opts must be a string of JVM options, e.g. "-Xmx256m -XX:+UseSerialGC".',
+    'a: java_opts must be a string of JVM options, e.g. "-Xmx256m -XX:+UseSerialGC".',
+  ]);
+});

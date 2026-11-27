@@ -21,7 +21,7 @@ export interface Service {
   build: Build | null;
   /** Jar to run with java -jar, relative to dir. `*` may appear in the file name. */
   jar: string | null;
-  /** Options placed before -jar, such as -Xmx512m */
+  /** Options placed before -jar, such as -Xmx512m: the top-level java_opts, then the service's own */
   javaOpts: string;
   env: Record<string, string>;
   envFile: string | null;

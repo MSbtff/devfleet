@@ -216,12 +216,14 @@ devfleet init --jar     # generate build + jar instead of cmd: ./gradlew bootRun
 ```
 
 ```yaml
+java_opts: -XX:TieredStopAtLevel=1    # JVM options for every jar service, placed before -jar
+
 services:
   account-service:
     dir: AccountService
     build: ./gradlew bootJar          # runs before the service starts
     jar: build/libs/*.jar             # relative to dir; the newest match wins, *-plain.jar is skipped
-    java_opts: -XX:TieredStopAtLevel=1   # optional, placed before -jar
+    java_opts: -Xmx512m               # optional, this service only; comes after the top-level ones and wins
     port: 7071
 
   menus-service:                      # a module of a multi-module build
@@ -238,7 +240,7 @@ services:
 - **A copy runs, not the build output.** devfleet copies the jar to `.devfleet/jars/<service>.jar` and runs that, so a build can overwrite `build/libs` while the service is running. On APFS (macOS), btrfs, and XFS the copy is a copy-on-write clone that takes no extra disk space; elsewhere it is a plain copy.
 - **Java comes from `JAVA_HOME`** when it is set (in your shell, `env`, or `env_file`), otherwise from `PATH`.
 - `build` works without `jar` too: any service can run a build command before its `cmd`.
-- **Most of the memory left is the apps, so trim them with `java_opts`.** `bootRun` starts apps with `-XX:TieredStopAtLevel=1` (Spring Boot's optimized launch) and `java -jar` does not, so `init --jar` adds it to every service. Capping the heap saves far more: add `-Xmx256m -XX:+UseSerialGC` if your apps fit in that heap. Without a cap, each JVM may grow its heap to a quarter of the machine's memory, so on a 16 GB laptop nine apps could take far more than it has; `devfleet up` warns when the uncapped jar services are many for the machine's memory.
+- **Most of the memory left is the apps, so trim them with `java_opts`.** `bootRun` starts apps with `-XX:TieredStopAtLevel=1` (Spring Boot's optimized launch) and `java -jar` does not, so `init --jar` puts it in the top-level `java_opts`. Capping the heap saves far more: add `-Xmx256m -XX:+UseSerialGC` there if your apps fit in that heap, and raise it for the services that need more. Use `java_opts` rather than `JAVA_TOOL_OPTIONS` in `env`: builds get `env` too, and a 256 MB heap limit would reach the Gradle daemon. Without a cap, each JVM may grow its heap to a quarter of the machine's memory, so on a 16 GB laptop nine apps could take far more than it has; `devfleet up` warns when the uncapped jar services are many for the machine's memory.
 - **Measured in the 9-service project above** (Java memory one minute after everything was ready): `bootRun` used 7.1 GB, of which 4.5 GB were Gradle daemons and wrapper clients. Jar mode used 3.8 GB, 3.5 GB with `-XX:TieredStopAtLevel=1`, and 2.6 GB with `-Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1`. After shutdown, `bootRun` left two idle daemons (0.85 GB); jar mode left nothing.
 - If your build uses Kotlin, `kotlin.compiler.execution.strategy=in-process` in `gradle.properties` keeps the Kotlin compiler from starting a daemon of its own.
 

@@ -72,6 +72,7 @@ export function normalizeConfig(raw: unknown, root: string): Config {
   const defaults = {
     restart: normalizeRestart(data.restart, 'restart', 'no', errors),
     maxRestarts: normalizeCount(data.max_restarts, 'max_restarts', DEFAULT_MAX_RESTARTS, errors),
+    javaOpts: normalizeJavaOpts(data.java_opts, 'java_opts', errors),
   };
   const services: Record<string, Service> = {};
   const rawServices = data.services ?? {};
@@ -96,7 +97,8 @@ export function normalizeConfig(raw: unknown, root: string): Config {
         cmd: s.cmd == null ? '' : String(s.cmd),
         build: normalizeBuild(s.build, dir, root, name, errors),
         jar: normalizeJar(s.jar, name, errors),
-        javaOpts: s.java_opts == null ? '' : String(s.java_opts),
+        // The top-level java_opts come first, so a service's own options override them.
+        javaOpts: [defaults.javaOpts, normalizeJavaOpts(s.java_opts, `${name}: java_opts`, errors)].filter(Boolean).join(' '),
         env: stringifyEnv(s.env),
         envFile: s.env_file ? path.resolve(root, String(s.env_file)) : null,
         dependsOn: toList(s.depends_on),
@@ -210,6 +212,16 @@ function normalizeGradleDaemon(value: unknown, errors: string[]): GradleDaemonPo
   if (value === 'keep') return 'keep';
   errors.push('gradle_daemon must be "stop" or "keep".');
   return 'stop';
+}
+
+/** JVM options as one line. A YAML block scalar (|) would otherwise put newlines into the shell command. */
+function normalizeJavaOpts(value: unknown, label: string, errors: string[]): string {
+  if (value == null) return '';
+  if (typeof value !== 'string') {
+    errors.push(`${label} must be a string of JVM options, e.g. "-Xmx256m -XX:+UseSerialGC".`);
+    return '';
+  }
+  return value.trim().replace(/\s+/g, ' ');
 }
 
 function normalizeCount(value: unknown, label: string, fallback: number, errors: string[]): number {

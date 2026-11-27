@@ -257,7 +257,7 @@ export function heapWarning(
   const total = Number((totalMemory / GB).toFixed(1));
   return (
     `${uncapped.length} jar services have no heap limit, so each may grow to ${each} GB (a quarter of this machine's ${total} GB). ` +
-    'If memory runs short, cap them in java_opts, e.g. -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1.'
+    'If memory runs short, cap them with the top-level java_opts, e.g. java_opts: -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1.'
   );
 }
 

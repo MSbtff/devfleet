@@ -169,6 +169,7 @@ test('init --jar: bootRun 대신 jar를 빌드하고 java -jar로 실행하는 �
 
   const text = renderConfig(project);
   assert.match(text, /# Jar mode:/);
+  assert.match(text, /^java_opts: -XX:TieredStopAtLevel=1$/m, '서비스마다가 아니라 최상위에 한 번');
   const config = normalizeConfig(YAML.parse(text), root);
   assert.deepEqual(config.errors, []);
   assert.deepEqual(config.services.menus?.build, { cmd: './gradlew :apps:menus:bootJar', dir: root });

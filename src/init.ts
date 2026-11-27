@@ -386,6 +386,10 @@ export function renderConfig(project: DetectedProject): string {
       '# build_concurrency: 2   # build several apps at once (faster, but one daemon each)',
       '# gradle_daemon: keep    # keep the build daemon after builds (faster rebuilds, more memory)',
       '',
+      '# JVM options for every jar service; a service\'s own java_opts come after these and win.',
+      '# -XX:TieredStopAtLevel=1 is what bootRun uses. Add -Xmx256m -XX:+UseSerialGC for even less memory.',
+      'java_opts: -XX:TieredStopAtLevel=1',
+      '',
     );
   }
   lines.push('services:');
@@ -402,7 +406,7 @@ export function renderConfig(project: DetectedProject): string {
       } else {
         lines.push('    build:', `      cmd: ${scalar(app.build.cmd)}`, `      dir: ${scalar(path.relative(project.root, app.build.dir) || '.')}`);
       }
-      lines.push(`    jar: ${scalar(app.jar)}`, '    java_opts: -XX:TieredStopAtLevel=1   # what bootRun uses; add -Xmx256m -XX:+UseSerialGC for even less memory');
+      lines.push(`    jar: ${scalar(app.jar)}`, '    # java_opts: -Xmx512m   # this service only, after the top-level java_opts');
     } else {
       lines.push(`    cmd: ${scalar(app.cmd)}`);
     }
