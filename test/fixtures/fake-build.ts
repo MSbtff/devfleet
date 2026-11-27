@@ -1,8 +1,3 @@
-// 테스트용 가짜 빌드.
-// 인자: --name=a --out=<jar 경로> --log=<기록 파일> --delay=ms --fail-if=<파일: 있으면 실패> --daemon
-// 시작과 끝을 기록 파일에 한 줄씩 남기고, 성공하면 jar 대신 이름과 빌드 횟수를 쓴 파일을 만든다.
-// --daemon: Gradle처럼 GRADLE_OPTS의 데몬 레지스트리에 살아 있는 데몬이 없으면 하나 띄우고(명령줄에 GradleDaemon),
-// 레지스트리가 없으면 띄우지 않는다. 쓴 데몬은 `daemon <pid>`, 없으면 `daemon none`으로 기록한다.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -30,10 +25,9 @@ function daemon(): number | null {
     try {
       if (pid && pid !== process.pid) {
         process.kill(pid, 0);
-        if (fs.readFileSync(path.join(dir, file), 'utf8') === 'fake') return pid; // 살아 있는 데몬을 다시 쓴다
+        if (fs.readFileSync(path.join(dir, file), 'utf8') === 'fake') return pid;
       }
     } catch {
-      /* 끝난 데몬 */
     }
   }
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)', 'GradleDaemon'], {

@@ -39,17 +39,13 @@ interface ServiceState {
   exited?: Promise<ExitInfo>;
   startedAt?: number;
   readySeconds?: string;
-  /** When the current process became ready */
   readyAt?: number;
-  /** Automatic restarts so far in this run */
   restarts?: number;
-  /** Automatic restarts in a row since the service last stayed up */
   attempts?: number;
 }
 
 export interface Plan {
   targets: string[];
-  /** Services the targets depend on that are not started in this run (--no-deps) */
   external: string[];
   waves: string[][];
 }
@@ -63,14 +59,11 @@ export interface UpOptions {
   out?: Output;
   color?: boolean;
   externalTimeoutMs?: number;
-  /** Delay before the first automatic restart; doubles with each attempt in a row */
   restartDelayMs?: number;
-  /** Run each service's build before starting it (default true) */
   build?: boolean;
 }
 
 export interface RestartOptions {
-  /** Run the service's build first (default true) */
   build?: boolean;
 }
 
@@ -81,7 +74,6 @@ export interface SummaryRow {
   pid: number | null;
   readySeconds: string | null;
   logFile: string | null;
-  /** Automatic restarts so far in this run (missing in replies from devfleet 0.2.0) */
   restarts?: number;
 }
 
@@ -94,21 +86,10 @@ export interface Fleet {
   plan: Plan;
   state: Map<string, ServiceState>;
   logger: Logger;
-  /** Resolves with a summary once every service has finished trying to start (success or failure). */
   ready: Promise<SummaryRow[]>;
-  /**
-   * Resolves once no process devfleet started is running any more.
-   * A service stopped on request (`devfleet stop`) keeps the fleet open so it can be restarted.
-   */
   allExited: Promise<void>;
-  /** Current status of every service in this run. */
   summarize(): SummaryRow[];
-  /**
-   * Rebuilds the services that have a build, then stops them (dependents first) and starts them again
-   * in dependency order. A service whose build fails keeps running as it was.
-   */
   restart(names: readonly string[], options?: RestartOptions): Promise<ActionResult>;
-  /** Stops the services, dependents first. Services that depend on them keep running. */
   stopServices(names: readonly string[]): Promise<ActionResult>;
   stop(options?: { force?: boolean }): Promise<void>;
 }
@@ -125,7 +106,6 @@ export function planUp(config: Config, names: readonly string[] = [], { deps = t
   return { targets, external, waves: waves(config.services, targets) };
 }
 
-/** Path relative to the config folder, or the absolute path when it is outside. */
 export function displayPath(root: string, target: string): string {
   const rel = path.relative(root, target);
   if (!rel) return '.';
@@ -144,16 +124,10 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
     try {
       child.kill(signal);
     } catch {
-      /* already exited */
     }
   }
 }
 
-/**
- * Whether any process in the group is still alive.
- * Shells such as dash run the `sh -c` command as a child instead of exec-ing it,
- * so the service can stay in the group after the shell itself exits on SIGTERM.
- */
 function groupAlive(child: ChildProcess): boolean {
   if (IS_WIN || child.pid === undefined) return isRunning(child);
   try {
@@ -177,7 +151,6 @@ function killPid(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(pid, signal);
   } catch {
-    /* already exited */
   }
 }
 
@@ -200,7 +173,6 @@ function waitForExit(child: ChildProcess): Promise<number> {
 const RESTART_RESET_MS = 60_000;
 const MAX_RESTART_DELAY_MS = 30_000;
 
-/** Newest file matching `pattern` (relative to dir, `*` and `?` in the file name), skipping plain, sources, and javadoc jars. */
 export function findJar(dir: string, pattern: string): string | null {
   const folder = path.resolve(dir, path.dirname(pattern));
   const base = path.basename(pattern);
@@ -226,7 +198,6 @@ function shellQuote(arg: string): string {
   return /^[A-Za-z0-9_./:=-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
-/** java from JAVA_HOME when it is set, otherwise from PATH. */
 function javaCommand(env: NodeJS.ProcessEnv, javaOpts: string, jar: string): string {
   const java = env.JAVA_HOME ? path.join(env.JAVA_HOME, 'bin', 'java') : 'java';
   return [shellQuote(java), javaOpts.trim(), '-jar', shellQuote(jar)].filter(Boolean).join(' ');
@@ -235,12 +206,6 @@ function javaCommand(env: NodeJS.ProcessEnv, javaOpts: string, jar: string): str
 const HEAP_LIMIT = /(?:^|\s)(?:-Xmx\S|-XX:MaxHeapSize=|-XX:MaxRAM=|-XX:MaxRAMPercentage=)/;
 const GB = 1024 ** 3;
 
-/**
- * Warns when jar services run without a heap limit and together could plausibly outgrow this machine.
- * Without one, the JVM lets each app's heap grow to a quarter of physical memory. Apps idle at a few
- * hundred MB but grow under load and hand little back, so this assumes about 1 GB each in real use
- * and warns when that passes half of the memory.
- */
 export function heapWarning(
   services: readonly Pick<Config['services'][string], 'jar' | 'javaOpts' | 'env'>[],
   env: NodeJS.ProcessEnv,
@@ -261,7 +226,6 @@ export function heapWarning(
   );
 }
 
-/** The command a service runs, as shown in plans: the shell command, or java -jar for a jar. */
 export function describeCommand(svc: Pick<Config['services'][string], 'cmd' | 'jar' | 'javaOpts'>): string {
   return svc.jar ? ['java', svc.javaOpts.trim(), '-jar', svc.jar].filter(Boolean).join(' ') : svc.cmd;
 }
@@ -270,7 +234,6 @@ function formatSeconds(ms: number): string {
   return `${Number((ms / 1000).toFixed(1))}s`;
 }
 
-/** Starts services in dependency order. */
 export function startFleet(config: Config, names: readonly string[] = [], opts: UpOptions = {}): Fleet {
   const {
     deps = true,
@@ -305,22 +268,15 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   let infraStarted = false;
   let infraChild: ChildProcess | null = null;
   let startupDone = false;
-  /** Services a restart or stop request is working on */
   const busy = new Set<string>();
-  /** Build processes that are running, so a shutdown can stop them */
   const builds = new Set<ChildProcess>();
   let buildSlots = config.buildConcurrency;
   const buildQueue: (() => void)[] = [];
-  /** Builds that have been asked for and not finished, including those waiting for a slot */
   let pendingBuilds = 0;
-  /** Builds use their own Gradle daemon registry here, so their daemons can be stopped once the builds are done. */
   const daemonDir = config.gradleDaemon === 'stop' ? path.join(config.root, '.devfleet', 'gradle-daemons') : null;
   let daemonStop: Promise<void> | null = null;
-  /** Builds started for `up`, so a service skipped before its build runs can cancel it */
   const startupBuilds = new Map<string, { promise: Promise<boolean>; cancel: () => void }>();
-  /** A second Ctrl+C arrived while shutting down */
   let forcing = false;
-  /** Automatic restarts in progress, so a restart or stop request can cancel them */
   const autoRestarts = new Map<string, { cancel: AbortController; done: Promise<void> }>();
   let resolveAllExited!: () => void;
   const allExited = new Promise<void>((resolve) => (resolveAllExited = resolve));
@@ -349,7 +305,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     }
     infraStarted = true;
 
-    // Read container states directly so one-shot init containers that exit 0 count as ready.
     const startedAt = Date.now();
     const deadline = startedAt + infraConfig.timeout * 1000;
     let lastWaiting = '';
@@ -440,9 +395,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         logger.error(name, `no jar matches ${svc.jar} in ${displayPath(config.root, svc.dir)}.${hint}`);
         return false;
       }
-      // Run a copy, so a later build can overwrite the original while this process keeps running.
-      // FICLONE makes it a copy-on-write clone that takes no extra disk space on APFS, btrfs, and XFS,
-      // and falls back to a plain copy elsewhere.
       const runJar = path.join(config.root, '.devfleet', 'jars', `${name}.jar`);
       try {
         fs.mkdirSync(path.dirname(runJar), { recursive: true });
@@ -480,7 +432,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
 
     void exited.then(({ code, signal }) => {
       if (stopping) return;
-      // A restart replaces the child; only the current one can crash.
       if (state.get(name)?.child === child && state.get(name)?.status === 'ready') {
         set(name, { status: 'crashed' });
         logger.error(name, `exited (${signal ?? `code ${code}`})`);
@@ -528,28 +479,18 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     buildQueue.shift()?.();
   }
 
-  /**
-   * Runs the service's build. Builds wait for a free slot (build_concurrency, default 1), so with Gradle
-   * one daemon is reused instead of each service keeping its own.
-   * `mark` shows the service as building; a restart leaves the running service's status alone.
-   */
   interface BuildToken {
     cancelled: boolean;
     child: ChildProcess | null;
   }
 
-  /**
-   * `startup`: the build for `up`. It shows the service as building, can be cancelled through `token`,
-   * and is skipped when the service is already running (an IDE, say), since launch() reuses it then.
-   * A restart's build leaves the running service's status alone.
-   */
   async function buildService(name: string, { startup = false, token }: { startup?: boolean; token?: BuildToken } = {}): Promise<boolean> {
     const svc = service(name);
     const build = svc.build!;
     pendingBuilds += 1;
     await buildSlot();
     try {
-      if (daemonStop) await daemonStop; // don't hand the build a daemon that is shutting down
+      if (daemonStop) await daemonStop;
       if (stopping || token?.cancelled) return false;
       if (startup && svc.port && (await isPortOpen(svc.port)) && (await checkOnce(svc.health))) {
         logger.info(name, `already running on port ${svc.port}; skipping the build`);
@@ -597,12 +538,10 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     } finally {
       releaseBuildSlot();
       pendingBuilds -= 1;
-      // Wait a tick: the next build in a restart is asked for right after this one finishes.
       if (pendingBuilds === 0) setTimeout(() => void stopBuildDaemons(), 0);
     }
   }
 
-  /** Stops the Gradle daemons the builds started, once no build is running or waiting (gradle_daemon: stop). */
   function stopBuildDaemons({ force = false, shutdown = false } = {}): Promise<void> {
     if (!daemonDir) return Promise.resolve();
     if (daemonStop && !(force && shutdown)) return daemonStop;
@@ -621,7 +560,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     return current;
   }
 
-  /** Starts the `up` build of a service; builds take slots in the order they are started. */
   function startBuild(name: string): void {
     const token: BuildToken = { cancelled: false, child: null };
     const promise = buildService(name, { startup: true, token });
@@ -652,7 +590,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         }
         const failed = svc.dependsOn.filter((_, i) => !results[i]);
         if (failed.length) {
-          build?.cancel(); // its build would only finish after `up` is done, for nothing
+          build?.cancel();
           set(name, { status: 'skipped' });
           logger.warn(name, `skipped: dependencies are not ready (${failed.join(', ')})`);
           return false;
@@ -678,13 +616,12 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     const svc = service(name);
     const { child } = st;
     set(name, { status: 'stopping' });
-    // Escalate based on the whole process group, not just the shell.
     if (groupAlive(child)) {
       if (force) {
         killGroup(child, 'SIGKILL');
       } else {
         logger.info(name, 'stopping…');
-        killGroup(child, 'SIGINT'); // Same signal as Ctrl+C in a terminal. Gradle needs it to shut bootRun down cleanly.
+        killGroup(child, 'SIGINT');
         if (!(await waitGroupExit(child, svc.stopTimeout * 1000))) {
           killGroup(child, 'SIGTERM');
           if (!(await waitGroupExit(child, 5000))) killGroup(child, 'SIGKILL');
@@ -692,8 +629,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       }
       await waitGroupExit(child, 3000);
     }
-    // Clean up children outside the process group that still hold the port, such as JVMs forked by the Gradle daemon.
-    // The port was free before start, so whatever holds it now was started by this service.
     if (svc.port && (await isPortOpen(svc.port))) {
       const listeners = await findListeners(svc.port);
       for (const l of listeners) {
@@ -707,7 +642,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     set(name, { status: 'stopped' });
   }
 
-  /** Waits for a build cut short by the shutdown to exit, escalating like a service stop. */
   async function stopBuild(child: ChildProcess): Promise<void> {
     if (await waitGroupExit(child, 10_000)) return;
     killGroup(child, 'SIGTERM');
@@ -715,7 +649,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     await waitGroupExit(child, 3000);
   }
 
-  /** A second Ctrl+C during a shutdown: kill what is left now instead of starting the shutdown over. */
   function forceKill(): void {
     if (forcing) return;
     forcing = true;
@@ -739,7 +672,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       for (const wave of [...plan.waves].reverse()) {
         await Promise.all(wave.map((name) => stopOne(name, force)));
       }
-      // Their output must be written before the log files are closed.
       await buildsExited;
       const infraConfig = config.infra;
       if (infraStarted && infraConfig && (stopInfra || infraConfig.stopOnExit)) {
@@ -754,7 +686,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
       } else if (infraStarted) {
         logger.info(INFRA, 'leaving infra containers running (stop them with: devfleet down)');
       }
-      // Builds cut short by the shutdown leave their daemon behind too.
       if (!forcing) await daemonStop;
       await stopBuildDaemons({ force: forcing, shutdown: true });
       await logger.close();
@@ -771,7 +702,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     resolveAllExited();
   }
 
-  /** Why the services can't be restarted or stopped right now, or null. */
   function refuse(names: readonly string[]): string | null {
     if (stopping) return 'devfleet is shutting down';
     if (!names.length) return 'no services given';
@@ -787,7 +717,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     return null;
   }
 
-  /** The given services grouped into this run's start waves, in start order. */
   function wavesOf(names: readonly string[]): string[][] {
     return plan.waves.map((wave) => wave.filter((n) => names.includes(n))).filter((wave) => wave.length);
   }
@@ -797,7 +726,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     if (error) return { ok: false, error };
     for (const name of names) busy.add(name);
     try {
-      // A request takes over from an automatic restart, e.g. to stop a service that keeps crashing.
       await Promise.all(
         names.map((name) => {
           const auto = autoRestarts.get(name);
@@ -825,7 +753,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     });
   }
 
-  /** Starts a stopped service again if its dependencies are ready. */
   async function startAgain(name: string): Promise<boolean> {
     if (stopping) return false;
     const notReady = service(name).dependsOn.filter((dep) => {
@@ -840,13 +767,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     return launch(name);
   }
 
-  /**
-   * Restarts a service that crashed after becoming ready (restart: on-failure).
-   * Waits restartDelayMs, then twice as long for each further attempt in a row, up to 30 seconds.
-   * A service that stayed up for a minute before crashing gets its full max_restarts again.
-   */
   function autoRestart(name: string): void {
-    // A restart or stop request is already handling it.
     if (busy.has(name) || autoRestarts.has(name) || stopping) return;
     const cancel = new AbortController();
     const onStop = () => cancel.abort();
@@ -876,7 +797,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         logger.warn(name, `restarting in ${formatSeconds(delay)} (attempt ${attempts}/${svc.maxRestarts})`);
         await sleep(delay, cancelled);
         if (cancelled.aborted) return;
-        await stopOne(name, false); // clears anything the crashed process left on the port
+        await stopOne(name, false);
         if (cancelled.aborted) return;
         if (await startAgain(name)) return;
       }
@@ -889,7 +810,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
   function restart(names: readonly string[], { build = true }: RestartOptions = {}): Promise<ActionResult> {
     const unique = [...new Set(names)];
     return withBusy(unique, async () => {
-      // Build before stopping anything, so a failed build leaves the running process alone.
       const buildFailed: string[] = [];
       if (build) {
         const toBuild = wavesOf(unique.filter((n) => service(n).build)).flat();
@@ -941,7 +861,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
 
   const ready = (async () => {
     for (const name of plan.targets) set(name, { status: 'waiting' });
-    // Builds need neither the infra nor other services, so they start right away, in start order.
     if (buildFirst) for (const name of plan.waves.flat()) if (service(name).build) startBuild(name);
     if (await startInfra()) {
       await Promise.all(plan.targets.map(ensure));
@@ -987,7 +906,6 @@ export function formatSummary(rows: readonly SummaryRow[]): string {
   return formatTable([header, ...body]);
 }
 
-/** Aligns columns, counting wide characters such as Hangul as two cells. */
 export function formatTable(rows: readonly (readonly string[])[]): string {
   const columns = Math.max(...rows.map((r) => r.length));
   const widths = Array.from({ length: columns }, (_, i) => Math.max(...rows.map((r) => displayWidth(r[i] ?? ''))));

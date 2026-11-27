@@ -12,15 +12,13 @@ import { FAKE, fake, freePort, setup, sleep, tempDir } from './helpers.ts';
 
 const FAKE_BUILD = fileURLToPath(new URL('./fixtures/fake-build.ts', import.meta.url));
 const node = JSON.stringify(process.execPath);
-const skip = process.platform === 'win32'; // 가짜 java가 셸 스크립트라서
+const skip = process.platform === 'win32';
 
-/** 가짜 빌드 명령. jar는 서비스 폴더의 build/libs/<name>-1.0.jar에 만들어진다. */
 const build = (name: string, root: string, extra = '') =>
   `${node} ${JSON.stringify(FAKE_BUILD)} --name=${name} --out=build/libs/${name}-1.0.jar --log=${JSON.stringify(
     path.join(root, 'builds.log'),
   )} ${extra}`;
 
-/** JAVA_HOME/bin/java 자리에 놓는 가짜 java: 받은 인자를 찍고 가짜 서비스를 실행한다. */
 function fakeJavaHome(): string {
   const home = tempDir('devfleet-java-');
   fs.mkdirSync(path.join(home, 'bin'));
@@ -260,7 +258,6 @@ test('gradle_daemon은 "stop"(기본값) 또는 "keep"', () => {
 test('빌드가 끝나면 빌드가 띄운 Gradle 데몬만 멈추고, restart로 다시 빌드한 뒤에도 멈춘다', { skip }, async () => {
   const [pa, pb] = await Promise.all([freePort(), freePort()]);
   const root = tempDir();
-  // 레지스트리에 남은 옛 로그의 PID가 지금은 다른 프로세스(이 테스트)일 수 있다. 그런 프로세스는 건드리지 않는다.
   const registry = path.join(root, '.devfleet', 'gradle-daemons', '9.9');
   fs.mkdirSync(registry, { recursive: true });
   fs.writeFileSync(path.join(registry, `daemon-${process.pid}.out.log`), 'stale');
@@ -406,7 +403,7 @@ test('stopDaemons: 로그보다 늦게 시작한 프로세스는 PID가 재사�
     return child;
   };
   const ours = spawnDaemon();
-  const other = spawnDaemon(); // 예: IDE의 데몬이 옛 로그의 PID를 물려받았다
+  const other = spawnDaemon();
   try {
     await sleep(200);
     fs.writeFileSync(path.join(dir, '9.9', `daemon-${ours.pid}.out.log`), 'live');
@@ -414,7 +411,7 @@ test('stopDaemons: 로그보다 늦게 시작한 프로세스는 PID가 재사�
     fs.writeFileSync(old, 'old');
     const past = new Date(Date.now() - 60_000);
     fs.utimesSync(old, past, past);
-    fs.writeFileSync(path.join(dir, '9.9', 'daemon-999999.out.log'), 'gone'); // 끝난 데몬
+    fs.writeFileSync(path.join(dir, '9.9', 'daemon-999999.out.log'), 'gone');
 
     assert.deepEqual(await stopDaemons(dir), [ours.pid]);
     assert.equal(alive(ours.pid!), false);

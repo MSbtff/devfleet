@@ -6,7 +6,6 @@ export interface Args {
 const VALUE_FLAGS = new Set(['config', 'only', 'n']);
 const ALIASES: Record<string, string> = { c: 'config', q: 'quiet', f: 'follow', h: 'help', v: 'version' };
 
-/** Parses command-line arguments. Throws when an option that needs a value has none. */
 export function parseArgs(argv: readonly string[]): Args {
   const opts: Args = { _: [] };
   for (let i = 0; i < argv.length; i++) {

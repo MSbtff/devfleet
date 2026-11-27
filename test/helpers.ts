@@ -11,7 +11,6 @@ import type { Config } from '../src/types.ts';
 export const FAKE = fileURLToPath(new URL('./fixtures/fake-service.ts', import.meta.url));
 export const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 
-/** 가짜 서비스를 실행하는 셸 명령 */
 export const fake = (flags: string): string =>
   `${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE)} ${flags}`;
 

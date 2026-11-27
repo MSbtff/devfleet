@@ -8,7 +8,6 @@ export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'] as const;
 const DEFAULT_HEALTH_TIMEOUT = 180;
 const DEFAULT_MAX_RESTARTS = 3;
 
-/** Looks for the config file from the current folder upwards. */
 export function findConfig(start: string = process.cwd()): string | null {
   let dir = path.resolve(start);
   for (;;) {
@@ -22,7 +21,6 @@ export function findConfig(start: string = process.cwd()): string | null {
   }
 }
 
-/** Parses the simple KEY=VALUE format that `set -a; source .env` understands. */
 export function parseEnv(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -63,7 +61,6 @@ export function loadConfig(file: string): Config {
   return config;
 }
 
-/** Validates the parsed YAML and converts it to the internal form. Problems are collected in errors instead of thrown. */
 export function normalizeConfig(raw: unknown, root: string): Config {
   const errors: string[] = [];
   const data = isRecord(raw) ? raw : {};
@@ -97,7 +94,6 @@ export function normalizeConfig(raw: unknown, root: string): Config {
         cmd: s.cmd == null ? '' : String(s.cmd),
         build: normalizeBuild(s.build, dir, root, name, errors),
         jar: normalizeJar(s.jar, name, errors),
-        // The top-level java_opts come first, so a service's own options override them.
         javaOpts: [defaults.javaOpts, normalizeJavaOpts(s.java_opts, `${name}: java_opts`, errors)].filter(Boolean).join(' '),
         env: stringifyEnv(s.env),
         envFile: s.env_file ? path.resolve(root, String(s.env_file)) : null,
@@ -182,7 +178,6 @@ function normalizeBuild(value: unknown, dir: string, root: string, name: string,
   if (value == null || value === '') return null;
   if (typeof value === 'string') return { cmd: value, dir };
   if (isRecord(value) && typeof value.cmd === 'string' && value.cmd) {
-    // build.dir is relative to the config file, like the service's own dir.
     return { cmd: value.cmd, dir: value.dir == null ? dir : path.resolve(root, String(value.dir)) };
   }
   errors.push(`${name}: build must be a shell command or { cmd, dir }.`);
@@ -214,7 +209,6 @@ function normalizeGradleDaemon(value: unknown, errors: string[]): GradleDaemonPo
   return 'stop';
 }
 
-/** JVM options as one line. A YAML block scalar (|) would otherwise put newlines into the shell command. */
 function normalizeJavaOpts(value: unknown, label: string, errors: string[]): string {
   if (value == null) return '';
   if (typeof value !== 'string') {

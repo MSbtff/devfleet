@@ -1,7 +1,3 @@
-// 테스트용 가짜 서비스.
-// 인자: --port=N --delay=ms --crash=ms --crash-after-ready=ms --orphan --status=503
-//       --ignore=SIGINT,SIGTERM --print-env=A,B
-//       --crash-times=N --counter=<file>: --crash-after-ready를 처음 N번 실행할 때만 적용한다
 import fs from 'node:fs';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
@@ -35,7 +31,6 @@ if (args.crash) {
     process.exit(3);
   }, Number(args.crash));
 } else if (args.orphan) {
-  // Gradle 데몬처럼 앱을 다른 프로세스 그룹에 띄우고, 자신은 신호를 받으면 그냥 끝난다.
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), `--port=${port}`, `--delay=${delay}`], {
     detached: true,
     stdio: 'ignore',

@@ -35,13 +35,11 @@ export async function checkOnce(health: Health): Promise<boolean> {
 
 export interface WaitOptions {
   signal?: AbortSignal;
-  /** Returning false means the process died, so waiting stops */
   alive?: () => boolean;
   timeoutMs?: number;
   intervalMs?: number;
 }
 
-/** Waits until the health check passes. */
 export async function waitHealthy(
   health: Health,
   { signal, alive = () => true, timeoutMs, intervalMs }: WaitOptions = {},

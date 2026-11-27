@@ -16,7 +16,6 @@ interface Result {
   stderr: string;
 }
 
-/** CLI를 실행하고 끝날 때까지 기다린다. */
 function run(args: string[], cwd: string, timeout = 30_000): Promise<Result> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], { cwd, env: { ...process.env, NO_COLOR: '1' } });
@@ -42,7 +41,6 @@ interface Running {
   exited: Promise<number | null>;
 }
 
-/** 오래 실행되는 `devfleet up`을 띄우고 출력을 지켜본다. */
 function start(args: string[], cwd: string): Running {
   const child = spawn(process.execPath, [CLI, ...args], { cwd, env: { ...process.env, NO_COLOR: '1' } });
   let text = '';
@@ -72,14 +70,11 @@ function start(args: string[], cwd: string): Running {
   return { child, output: () => text, waitFor, exited };
 }
 
-/** devfleet.yaml을 쓴 임시 프로젝트 폴더. JSON은 그대로 유효한 YAML이다. */
 function project(config: Record<string, unknown>): string {
   const root = tempDir('devfleet-cli-');
   fs.writeFileSync(path.join(root, 'devfleet.yaml'), JSON.stringify(config, null, 2));
   return root;
 }
-
-// ---------------------------------------------------------------- parseArgs
 
 test('parseArgs: 위치 인자, 긴/짧은 옵션, 별칭, --no-*, --', () => {
   assert.deepEqual(parseArgs(['up', 'a', 'b', '-q', '--no-deps', '--only=x,y', '-c', 'f.yaml', '--', '--raw']), {
@@ -98,8 +93,6 @@ test('parseArgs: 값이 필요한 옵션에 값이 없으면 예외', () => {
   assert.throws(() => parseArgs(['up', '--only']), /--only needs a value/);
   assert.throws(() => parseArgs(['-c']), /--config needs a value/);
 });
-
-// ---------------------------------------------------------------- 기본 명령
 
 test('--version, 도움말, 알 수 없는 명령', async () => {
   const cwd = tempDir();
@@ -138,8 +131,6 @@ test('설정 파일이 없거나 잘못되면 이유와 함께 exit 1', async ()
   assert.match(result.stderr, /ghost/);
 });
 
-// ---------------------------------------------------------------- init
-
 test('init: 만들기, 덮어쓰기 거부, --force, --print', async () => {
   const root = tempDir('devfleet-cli-init-');
   const write = (rel: string, text: string) => {
@@ -172,8 +163,6 @@ test('init: 만들기, 덮어쓰기 거부, --force, --print', async () => {
   assert.equal(forced.code, 0);
   assert.match(fs.readFileSync(file, 'utf8'), /port: 8081/);
 });
-
-// ---------------------------------------------------------------- up / status / logs
 
 test('up --dry-run은 실행하지 않고 단계별 계획을 보여준다', async () => {
   const root = project({

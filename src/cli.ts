@@ -14,7 +14,6 @@ import { checkOnce, describeHealth } from './health.ts';
 import type { Config } from './types.ts';
 import { parseArgs, type Args } from './args.ts';
 
-// Both src/cli.ts and dist/cli.js have package.json one level up.
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 const HELP = `devfleet ${version} — start local microservices in dependency order
@@ -148,7 +147,6 @@ async function cmdUp(opts: Args): Promise<void> {
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
 
-  // Lets `devfleet status`, `restart`, `stop`, and `down` in other terminals reach this run.
   const control = await serveControl(controlPath(config), async (request, reply) => {
     if (request.cmd === 'status') {
       return reply.done({ ok: true, pid: process.pid, rows: fleet.summarize() });
@@ -223,7 +221,6 @@ async function cmdStatus(opts: Args): Promise<void> {
     console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'PROCESS'], ...rows]));
     return;
   }
-  // FLEET is what the running `devfleet up` knows: starting, crashed, stopped on request, ….
   const withFleet = rows.map(([name = '', port = '', status = '', who = '']) => {
     const row = managed.get(name);
     const restarts = row?.restarts ? ` · restarted ${row.restarts}×` : '';
@@ -233,7 +230,6 @@ async function cmdStatus(opts: Args): Promise<void> {
   console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'FLEET', 'PROCESS'], ...withFleet]));
 }
 
-/** Sends `restart` or `stop` to the running `devfleet up` and prints its progress. */
 async function cmdControl(opts: Args, cmd: 'restart' | 'stop'): Promise<void> {
   const config = requireConfig(opts);
   if (!opts._.length) fail(`Name a service or group, e.g. devfleet ${cmd} account-service`);

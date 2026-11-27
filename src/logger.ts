@@ -60,15 +60,13 @@ export class Logger {
     let stream = this.files.get(name);
     if (!stream) {
       stream = fs.createWriteStream(file, { flags: 'w' });
-      stream.on('error', () => {}); // a log file that can't be written must not take devfleet down
+      stream.on('error', () => {});
       this.files.set(name, stream);
     }
     return stream;
   }
 
-  /** One line of process output. Always written to the file; shown on screen depending on options. */
   line(name: string, text: string): void {
-    // Output can still arrive while shutting down; after close() it only goes to the screen.
     if (!this.closed) this.file(name)?.write(`${text}\n`);
     const tail = this.tails.get(name) ?? [];
     tail.push(text);
@@ -86,7 +84,6 @@ export class Logger {
     readline.createInterface({ input: stream, crlfDelay: Infinity }).on('line', (text) => this.line(name, text));
   }
 
-  /** Shows the last log lines of a service whose output was hidden, after it fails. */
   dumpTail(name: string): void {
     if (this.isVisible(name)) return;
     const tail = this.tails.get(name) ?? [];
@@ -103,7 +100,6 @@ export class Logger {
     }
   }
 
-  /** Calls `listener` with every status message (without colors) until the returned function is called. */
   subscribe(listener: (text: string) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

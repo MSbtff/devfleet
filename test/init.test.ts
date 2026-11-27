@@ -19,11 +19,9 @@ const ACTUATOR = "implementation 'org.springframework.boot:spring-boot-starter-a
 function makeProject() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devfleet-init-'));
   write(root, '.env', 'ACCOUNT_SERVER_PORT=7171\n');
-  // Eureka 서버: 자체 gradlew 보유
   write(root, 'eurekaServer/build.gradle', BOOT + ACTUATOR + "implementation 'spring-cloud-starter-netflix-eureka-server'\n");
   write(root, 'eurekaServer/gradlew', '');
   write(root, 'eurekaServer/src/main/resources/application.yaml', 'server:\n  port: "${EUREKA_PORT:8761}"\n');
-  // Account: 자체 gradlew, .env로 포트 덮어씀, 별도 management 포트, 프로필 문서는 무시
   write(root, 'AccountService/build.gradle', BOOT + ACTUATOR + "implementation 'eureka-client'\n");
   write(root, 'AccountService/gradlew', '');
   write(
@@ -31,11 +29,9 @@ function makeProject() {
     'AccountService/src/main/resources/application.yml',
     'server:\n  port: "${ACCOUNT_SERVER_PORT:7071}"\nmanagement:\n  server:\n    port: 9071\n---\nspring:\n  config:\n    activate:\n      on-profile: docker\nserver:\n  port: 80\n',
   );
-  // 멀티 모듈: 루트 gradlew를 쓰는 하위 프로젝트, properties 설정, actuator 없음
   write(root, 'gradlew', '');
   write(root, 'apps/menus/build.gradle.kts', 'plugins { id("org.springframework.boot") }\n');
   write(root, 'apps/menus/src/main/resources/application.properties', 'server.port=7072\nserver.servlet.context-path=/menus\n');
-  // 앱이 아닌 공유 라이브러리
   write(root, 'shared/lib/build.gradle', BOOT);
   write(
     root,
@@ -95,7 +91,6 @@ test('Config Server를 Eureka보다 먼저 띄우고, 서로 쓰는 경우의 �
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'devfleet-cloud-'));
   const CONFIG_CLIENT = "implementation 'org.springframework.cloud:spring-cloud-starter-config'\n";
   const EUREKA_CLIENT = "implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'\n";
-  // Config Server는 Eureka에 등록하고, Eureka는 설정을 Config Server에서 받는다.
   write(root, 'config/build.gradle', BOOT + ACTUATOR + "implementation 'spring-cloud-config-server'\n" + EUREKA_CLIENT);
   write(root, 'config/src/main/resources/application.yml', 'server:\n  port: 8888\n');
   write(root, 'registry/build.gradle', BOOT + "implementation 'spring-cloud-starter-netflix-eureka-server'\n");
@@ -106,7 +101,6 @@ test('Config Server를 Eureka보다 먼저 띄우고, 서로 쓰는 경우의 �
   );
   write(root, 'order/build.gradle', BOOT + CONFIG_CLIENT + EUREKA_CLIENT);
   write(root, 'order/src/main/resources/application.yml', 'server:\n  port: 8081\n');
-  // Eureka 클라이언트 의존성은 있지만 설정으로 끈 앱
   write(root, 'legacy/build.gradle', BOOT + EUREKA_CLIENT);
   write(root, 'legacy/src/main/resources/application.yml', 'server:\n  port: 8082\neureka:\n  client:\n    enabled: false\n');
 
@@ -163,7 +157,6 @@ test('init --jar: bootRun 대신 jar를 빌드하고 java -jar로 실행하는 �
   assert.deepEqual(apps['account-service'].build, { cmd: './gradlew bootJar', dir: path.join(root, 'AccountService') });
   assert.equal(apps['account-service'].jar, 'build/libs/*.jar');
   assert.equal(apps['account-service'].cmd, '');
-  // 멀티 모듈: 루트에서 빌드하고, 앱은 자기 폴더에서 실행한다
   assert.deepEqual(apps.menus.build, { cmd: './gradlew :apps:menus:bootJar', dir: root });
   assert.equal(apps.menus.runDir, path.join(root, 'apps/menus'));
 
