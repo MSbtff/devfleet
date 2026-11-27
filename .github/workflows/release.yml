@@ -1,13 +1,5 @@
 name: Release
 
-# Stages a release on npm when a version tag (v1.2.3) is pushed. A maintainer then
-# approves it on npmjs.com with 2FA, and only then does the version become public.
-# Uses npm Trusted Publishing (OIDC), so no npm token is stored anywhere, and npm
-# attaches a provenance attestation that links the package to this run.
-#
-# Run it by hand (Actions → Release → Run workflow) to stage an existing tag again,
-# for example after a failed run. The workflow file from the branch you run it on is
-# used, but the package is built from the tag.
 on:
   push:
     tags: ['v*']
@@ -27,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # lets npm verify this workflow run through OIDC
+      id-token: write
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
@@ -43,7 +35,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-      # Staged publishing needs npm 11.15.0 or newer.
       - run: npm install -g npm@11 && npm --version
       - name: Check that the tag matches package.json
         run: |
@@ -52,7 +43,7 @@ jobs:
             echo "::error::Tag $TAG does not match package.json version $expected"
             exit 1
           fi
-      - run: npm ci # the prepare script builds dist/
+      - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm stage publish

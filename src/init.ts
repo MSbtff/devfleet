@@ -29,19 +29,20 @@ export interface DetectedApp extends FoundApp {
   health: string | null;
   runDir: string;
   cmd: string;
+  build: { cmd: string; dir: string } | null;
+  jar: string | null;
   facts: AppFacts;
-  /** Server roles this app fills (e.g. Spring Cloud Config) */
   roles: string[];
   dependsOn: string[];
 }
 
 export interface DetectedProject {
   root: string;
+  jar: boolean;
   envFile: string | null;
   apps: DetectedApp[];
   composeFile: string | null;
   infra: string[];
-  /** Things the user should check by hand */
   warnings: string[];
 }
 
@@ -57,8 +58,10 @@ interface ComposeProject {
   services: Record<string, ComposeService>;
 }
 
-/** Scans the project for Spring Boot apps and the Compose setup. */
-export function detectProject(rootDir: string, { useDocker = true }: { useDocker?: boolean } = {}): DetectedProject {
+export function detectProject(
+  rootDir: string,
+  { useDocker = true, jar = false }: { useDocker?: boolean; jar?: boolean } = {},
+): DetectedProject {
   const root = path.resolve(rootDir);
   const envFile = fs.existsSync(path.join(root, '.env')) ? '.env' : null;
   const envVars = envFile ? parseEnv(fs.readFileSync(path.join(root, envFile), 'utf8')) : {};
@@ -66,7 +69,7 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
   walk(root, 0, found);
   const apps: DetectedApp[] = found.map((app) => ({
     ...app,
-    ...describeApp(app, root, envVars),
+    ...describeApp(app, root, envVars, jar),
     name: '',
     composeName: null,
     roles: [],
@@ -92,7 +95,6 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
     app.name = name;
   }
 
-  // Follow Compose depends_on to collect app dependencies and required infra.
   const infra = new Set<string>();
   const addInfra = (name: string): void => {
     const svc = compose?.services[name];
@@ -111,8 +113,6 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
     }
   }
 
-  // Apps that use a Spring Cloud server (Config, Eureka, Consul, Nacos, ...) start after it.
-  // Compose depends_on often omits this, so it is applied to Compose apps as well.
   const warnings: string[] = [];
   for (const rule of RULES) {
     const users = apps.filter((a) => rule.uses(a.facts));
@@ -136,6 +136,7 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
 
   return {
     root,
+    jar,
     envFile,
     apps,
     composeFile: compose?.file ?? null,
@@ -144,7 +145,6 @@ export function detectProject(rootDir: string, { useDocker = true }: { useDocker
   };
 }
 
-/** Makes app start after target. Skipped when it would create a cycle. */
 function addDependency(apps: readonly DetectedApp[], app: DetectedApp, target: DetectedApp): boolean {
   if (app === target || app.dependsOn.includes(target.name)) return false;
   const byName = new Map(apps.map((a) => [a.name, a]));
@@ -201,7 +201,7 @@ function walk(dir: string, depth: number, acc: FoundApp[]): void {
   }
 }
 
-function describeApp(app: FoundApp, root: string, envVars: Record<string, string>) {
+function describeApp(app: FoundApp, root: string, envVars: Record<string, string>, jar: boolean) {
   const props = readSpringProps(app.appConfig);
   const resolve = (key: string): string | null =>
     props[key] == null ? null : resolvePlaceholders(String(props[key]), envVars);
@@ -220,7 +220,7 @@ function describeApp(app: FoundApp, root: string, envVars: Record<string, string
   return {
     port,
     health,
-    ...runCommand(app, root),
+    ...(jar ? jarCommand(app, root) : { ...runCommand(app, root), build: null, jar: null }),
     facts: { buildText: app.buildText, props },
   };
 }
@@ -230,7 +230,6 @@ function runCommand(app: FoundApp, root: string): { runDir: string; cmd: string 
   const wrapper = gradle ? 'gradlew' : 'mvnw';
   const task = gradle ? 'bootRun' : 'spring-boot:run';
   if (fs.existsSync(path.join(app.dir, wrapper))) return { runDir: app.dir, cmd: `./${wrapper} ${task}` };
-  // Use the root (multi-module) wrapper and run the subproject by path.
   for (let dir = path.dirname(app.dir); dir.startsWith(root); dir = path.dirname(dir)) {
     if (fs.existsSync(path.join(dir, wrapper))) {
       const rel = path.relative(dir, app.dir).split(path.sep);
@@ -242,7 +241,25 @@ function runCommand(app: FoundApp, root: string): { runDir: string; cmd: string 
   return { runDir: app.dir, cmd: gradle ? 'gradle bootRun' : 'mvn spring-boot:run' };
 }
 
-/** Reads default-profile values from application.yml/properties into a flat key map. */
+function jarCommand(app: FoundApp, root: string): Pick<DetectedApp, 'runDir' | 'cmd' | 'build' | 'jar'> {
+  const gradle = app.buildFile !== 'pom.xml';
+  const wrapper = gradle ? 'gradlew' : 'mvnw';
+  const jar = gradle ? 'build/libs/*.jar' : 'target/*.jar';
+  const result = (cmd: string, dir: string) => ({ runDir: app.dir, cmd: '', build: { cmd, dir }, jar });
+  if (fs.existsSync(path.join(app.dir, wrapper))) {
+    return result(gradle ? './gradlew bootJar' : './mvnw -q -DskipTests package', app.dir);
+  }
+  for (let dir = path.dirname(app.dir); dir.startsWith(root); dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, wrapper))) {
+      const rel = path.relative(dir, app.dir).split(path.sep);
+      const cmd = gradle ? `./gradlew :${rel.join(':')}:bootJar` : `./mvnw -q -DskipTests -pl ${rel.join('/')} -am package`;
+      return result(cmd, dir);
+    }
+    if (dir === root) break;
+  }
+  return result(gradle ? 'gradle bootJar' : 'mvn -q -DskipTests package', app.dir);
+}
+
 export function readSpringProps(file: string): Record<string, unknown> {
   const text = fs.readFileSync(file, 'utf8');
   const result: Record<string, unknown> = {};
@@ -274,7 +291,6 @@ function flatten(value: Record<string, unknown>, prefix: string, out: Record<str
   }
 }
 
-/** Replaces ${NAME:default} with the .env value or the default. */
 export function resolvePlaceholders(text: string, env: Record<string, string>): string {
   return text.replace(
     /\$\{([^:}]+)(?::([^}]*))?\}/g,
@@ -287,7 +303,6 @@ function loadCompose(root: string, useDocker: boolean): ComposeProject | null {
   if (!file) return null;
   let doc: unknown = null;
   if (useDocker) {
-    // docker compose config works without the daemon and resolves extends, include, and variables.
     const res = spawnSync('docker', ['compose', '-f', file, 'config', '--format', 'json'], {
       cwd: root,
       encoding: 'utf8',
@@ -326,7 +341,6 @@ function loadCompose(root: string, useDocker: boolean): ComposeProject | null {
   return { file, services };
 }
 
-/** Renders the detection result as a commented devfleet.yaml. */
 export function renderConfig(project: DetectedProject): string {
   const lines = [
     '# devfleet config — a draft generated by `devfleet init`. Edit it to fit your setup.',
@@ -347,6 +361,20 @@ export function renderConfig(project: DetectedProject): string {
       '',
     );
   }
+  if (project.jar) {
+    lines.push(
+      '# Jar mode: each app is built once and run with java -jar, so no Gradle daemon stays busy per app.',
+      '# Builds run one at a time and reuse one daemon, which is stopped once the builds are done.',
+      '# `devfleet restart <name>` rebuilds before restarting.',
+      '# build_concurrency: 2   # build several apps at once (faster, but one daemon each)',
+      '# gradle_daemon: keep    # keep the build daemon after builds (faster rebuilds, more memory)',
+      '',
+      '# JVM options for every jar service; a service\'s own java_opts come after these and win.',
+      '# -XX:TieredStopAtLevel=1 is what bootRun uses. Add -Xmx256m -XX:+UseSerialGC for even less memory.',
+      'java_opts: -XX:TieredStopAtLevel=1',
+      '',
+    );
+  }
   lines.push('services:');
   const byName = Object.fromEntries(project.apps.map((a) => [a.name, a]));
   const ordered = waves(byName, project.apps.map((a) => a.name)).flat();
@@ -355,7 +383,16 @@ export function renderConfig(project: DetectedProject): string {
     if (app.roles.length) lines.push(`  # ${app.roles.join(', ')} server`);
     lines.push(`  ${scalar(name)}:`);
     lines.push(`    dir: ${scalar(path.relative(project.root, app.runDir) || '.')}`);
-    lines.push(`    cmd: ${scalar(app.cmd)}`);
+    if (app.build && app.jar) {
+      if (app.build.dir === app.runDir) {
+        lines.push(`    build: ${scalar(app.build.cmd)}`);
+      } else {
+        lines.push('    build:', `      cmd: ${scalar(app.build.cmd)}`, `      dir: ${scalar(path.relative(project.root, app.build.dir) || '.')}`);
+      }
+      lines.push(`    jar: ${scalar(app.jar)}`, '    # java_opts: -Xmx512m   # this service only, after the top-level java_opts');
+    } else {
+      lines.push(`    cmd: ${scalar(app.cmd)}`);
+    }
     lines.push(`    port: ${app.port}`);
     if (app.dependsOn.length) lines.push(`    depends_on: [${app.dependsOn.map(scalar).join(', ')}]`);
     lines.push(app.health ? `    health: ${scalar(app.health)}` : '    # health: when omitted, the service is ready once the port accepts connections');

@@ -1,6 +1,5 @@
 import type { DependencyMap } from './types.ts';
 
-/** Returns the cycle path if there is a dependency cycle, otherwise null. */
 export function findCycle(services: DependencyMap): string[] | null {
   const state = new Map<string, 'visiting' | 'done'>();
   const stack: string[] = [];
@@ -33,7 +32,6 @@ interface TargetSource {
   groups: Record<string, string[]>;
 }
 
-/** Expands service or group names into the services to run, in config-file order. */
 export function resolveTargets(
   config: TargetSource,
   names: readonly string[] = [],
@@ -64,7 +62,6 @@ export function resolveTargets(
   return Object.keys(config.services).filter((n) => selected.has(n));
 }
 
-/** Groups services by dependency depth. Services in the same wave can start in parallel. */
 export function waves(services: DependencyMap, names: readonly string[]): string[][] {
   const set = new Set(names);
   const level = new Map<string, number>();

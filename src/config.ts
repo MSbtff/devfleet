@@ -2,13 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import YAML from 'yaml';
 import { findCycle } from './graph.ts';
-import { isRecord, type Config, type Health, type Infra, type RestartPolicy, type Service } from './types.ts';
+import { isRecord, type Build, type Config, type GradleDaemonPolicy, type Health, type Infra, type RestartPolicy, type Service } from './types.ts';
 
 export const CONFIG_NAMES = ['devfleet.yaml', 'devfleet.yml'] as const;
 const DEFAULT_HEALTH_TIMEOUT = 180;
 const DEFAULT_MAX_RESTARTS = 3;
 
-/** Looks for the config file from the current folder upwards. */
 export function findConfig(start: string = process.cwd()): string | null {
   let dir = path.resolve(start);
   for (;;) {
@@ -22,7 +21,6 @@ export function findConfig(start: string = process.cwd()): string | null {
   }
 }
 
-/** Parses the simple KEY=VALUE format that `set -a; source .env` understands. */
 export function parseEnv(text: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -63,7 +61,6 @@ export function loadConfig(file: string): Config {
   return config;
 }
 
-/** Validates the parsed YAML and converts it to the internal form. Problems are collected in errors instead of thrown. */
 export function normalizeConfig(raw: unknown, root: string): Config {
   const errors: string[] = [];
   const data = isRecord(raw) ? raw : {};
@@ -72,6 +69,7 @@ export function normalizeConfig(raw: unknown, root: string): Config {
   const defaults = {
     restart: normalizeRestart(data.restart, 'restart', 'no', errors),
     maxRestarts: normalizeCount(data.max_restarts, 'max_restarts', DEFAULT_MAX_RESTARTS, errors),
+    javaOpts: normalizeJavaOpts(data.java_opts, 'java_opts', errors),
   };
   const services: Record<string, Service> = {};
   const rawServices = data.services ?? {};
@@ -83,15 +81,20 @@ export function normalizeConfig(raw: unknown, root: string): Config {
         errors.push(`${name}: settings are empty.`);
         continue;
       }
-      if (!s.cmd) errors.push(`${name}: cmd is required.`);
+      if (s.cmd && s.jar) errors.push(`${name}: use either cmd or jar, not both.`);
+      else if (!s.cmd && !s.jar) errors.push(`${name}: cmd is required (or jar, to run a jar with java -jar).`);
+      const dir = path.resolve(root, String(s.dir ?? '.'));
       const port = s.port == null ? null : Number(s.port);
       if (port != null && !(Number.isInteger(port) && port > 0 && port < 65536)) {
         errors.push(`${name}: port must be an integer between 1 and 65535.`);
       }
       services[name] = {
         name,
-        dir: path.resolve(root, String(s.dir ?? '.')),
+        dir,
         cmd: s.cmd == null ? '' : String(s.cmd),
+        build: normalizeBuild(s.build, dir, root, name, errors),
+        jar: normalizeJar(s.jar, name, errors),
+        javaOpts: [defaults.javaOpts, normalizeJavaOpts(s.java_opts, `${name}: java_opts`, errors)].filter(Boolean).join(' '),
         env: stringifyEnv(s.env),
         envFile: s.env_file ? path.resolve(root, String(s.env_file)) : null,
         dependsOn: toList(s.depends_on),
@@ -141,6 +144,8 @@ export function normalizeConfig(raw: unknown, root: string): Config {
     groups,
     infra,
     logDir: path.resolve(root, String(data.log_dir ?? '.devfleet/logs')),
+    buildConcurrency: normalizeCount(data.build_concurrency, 'build_concurrency', 1, errors) || 1,
+    gradleDaemon: normalizeGradleDaemon(data.gradle_daemon, errors),
     errors,
   };
 }
@@ -169,12 +174,48 @@ function normalizeHealth(health: unknown, port: number | null, name: string, err
   return { ...merged, type: 'none' };
 }
 
+function normalizeBuild(value: unknown, dir: string, root: string, name: string, errors: string[]): Build | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'string') return { cmd: value, dir };
+  if (isRecord(value) && typeof value.cmd === 'string' && value.cmd) {
+    return { cmd: value.cmd, dir: value.dir == null ? dir : path.resolve(root, String(value.dir)) };
+  }
+  errors.push(`${name}: build must be a shell command or { cmd, dir }.`);
+  return null;
+}
+
+function normalizeJar(value: unknown, name: string, errors: string[]): string | null {
+  if (value == null || value === '') return null;
+  const jar = String(value);
+  if (path.dirname(jar).includes('*')) {
+    errors.push(`${name}: jar may use * only in the file name, e.g. build/libs/*.jar.`);
+    return null;
+  }
+  return jar;
+}
+
 function normalizeRestart(value: unknown, label: string, fallback: RestartPolicy, errors: string[]): RestartPolicy {
   if (value == null) return fallback;
   if (value === false || value === 'no') return 'no';
   if (value === 'on-failure') return 'on-failure';
   errors.push(`${label} must be "no" or "on-failure".`);
   return fallback;
+}
+
+function normalizeGradleDaemon(value: unknown, errors: string[]): GradleDaemonPolicy {
+  if (value == null || value === 'stop') return 'stop';
+  if (value === 'keep') return 'keep';
+  errors.push('gradle_daemon must be "stop" or "keep".');
+  return 'stop';
+}
+
+function normalizeJavaOpts(value: unknown, label: string, errors: string[]): string {
+  if (value == null) return '';
+  if (typeof value !== 'string') {
+    errors.push(`${label} must be a string of JVM options, e.g. "-Xmx256m -XX:+UseSerialGC".`);
+    return '';
+  }
+  return value.trim().replace(/\s+/g, ' ');
 }
 
 function normalizeCount(value: unknown, label: string, fallback: number, errors: string[]): number {

@@ -43,7 +43,6 @@ test('한 번 실행하고 정상 종료한 컨테이너는 준비 완료로 본
   assert.deepEqual(failed.failures, ['mariadb: unhealthy', 'database-init: exited (exit 1)']);
 });
 
-/** docker 대신 쓸 가짜 명령. ps를 두 번째 호출할 때부터 준비 완료 상태를 돌려준다. */
 function fakeDocker(initExit: number): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devfleet-docker-'));
   const ready = [

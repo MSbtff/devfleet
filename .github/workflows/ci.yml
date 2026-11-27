@@ -12,8 +12,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Node versions are covered on Linux. macOS runs once to catch
-        # platform differences (process groups, lsof); macOS runners are scarce.
         include:
           - { os: ubuntu-latest, node: 22 }
           - { os: ubuntu-latest, node: 24 }
@@ -24,7 +22,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci # the prepare script builds dist/
+      - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - name: CLI smoke test
@@ -32,8 +30,6 @@ jobs:
           node dist/cli.js --version
           cd examples/demo && node ../../dist/cli.js up --dry-run
 
-  # package.json promises "node >=20". Tests need type stripping (22.18+),
-  # so build on 22 and run only the published CLI on 20.
   runtime-node20:
     name: runtime (ubuntu-latest, node 20)
     runs-on: ubuntu-latest

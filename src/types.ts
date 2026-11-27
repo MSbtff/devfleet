@@ -1,26 +1,31 @@
-/** How to tell that a service is ready */
 export type Health =
   | { type: 'http'; url: string; timeout: number; interval: number }
   | { type: 'tcp'; port: number; timeout: number; interval: number }
   | { type: 'none'; timeout: number; interval: number };
 
+export interface Build {
+  cmd: string;
+  dir: string;
+}
+
 export interface Service {
   name: string;
-  /** Absolute working directory for the command */
   dir: string;
   cmd: string;
+  build: Build | null;
+  jar: string | null;
+  javaOpts: string;
   env: Record<string, string>;
   envFile: string | null;
   dependsOn: string[];
   port: number | null;
   health: Health;
-  /** Seconds to wait for a clean exit after Ctrl+C */
   stopTimeout: number;
-  /** Whether to start the service again when it exits on its own after becoming ready */
   restart: RestartPolicy;
-  /** Automatic restarts allowed in a row before giving up */
   maxRestarts: number;
 }
+
+export type GradleDaemonPolicy = 'stop' | 'keep';
 
 export type RestartPolicy = 'no' | 'on-failure';
 
@@ -28,7 +33,6 @@ export interface Infra {
   composeFiles: string[];
   services: string[];
   stopOnExit: boolean;
-  /** Seconds to wait for the infra to become ready */
   timeout: number;
 }
 
@@ -41,10 +45,11 @@ export interface Config {
   groups: Record<string, string[]>;
   infra: Infra | null;
   logDir: string;
+  buildConcurrency: number;
+  gradleDaemon: GradleDaemonPolicy;
   errors: string[];
 }
 
-/** The minimum needed to compute the dependency graph */
 export type DependencyMap = Record<string, { dependsOn: string[] }>;
 
 export type RawRecord = Record<string, unknown>;

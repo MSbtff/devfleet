@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `restart: on-failure` and `max_restarts` (top level or per service): a service that exits on its own after becoming ready is started again after 1s, 2s, 4s, … (at most 30s), up to `max_restarts` times in a row (default 3). A service that stayed up for a minute gets its full budget again.
 - `devfleet stop` and `devfleet restart` cancel a pending automatic restart and take over.
 - `devfleet status` shows how many times the running `devfleet up` restarted each service.
+- Jar mode: `build`, `jar`, and `java_opts` per service. devfleet runs the build before starting the service, then runs a copy of the newest matching jar (skipping `*-plain.jar`) with `java -jar`, using `JAVA_HOME` when it is set. `build` also works on its own before any `cmd`, and takes `{ cmd, dir }` to build a module from the root project.
+- Builds run one at a time by default (`build_concurrency`), so Gradle reuses one daemon. They start right away in dependency order, alongside the infra, and are cancelled when a dependency fails. A service that is already running is reused without building it.
+- `devfleet init --jar` generates jar-mode settings for Gradle (`bootJar`) and Maven (`package`) apps, including multi-module projects, with a top-level `java_opts: -XX:TieredStopAtLevel=1`, which `bootRun` also uses.
+- Top-level `java_opts` apply to every jar service, followed by the service's own `java_opts`. Unlike `JAVA_TOOL_OPTIONS` in `env`, they don't reach the builds. Multi-line values are joined into one line.
+- `devfleet restart` rebuilds services that have a `build` before stopping them, and leaves the running process alone when the build fails. `devfleet restart --no-build` and `devfleet up --no-build` skip builds.
+- Once no build is running or waiting, devfleet stops the Gradle daemons its builds used instead of leaving them idle in memory for three hours. Builds use their own daemon registry under `.devfleet/gradle-daemons`, so daemons used by an IDE or a `bootRun` service are not touched. `gradle_daemon: keep` turns this off.
+- The jar copy in `.devfleet/jars` is a copy-on-write clone where the file system supports it (APFS, btrfs, XFS), so it takes no extra disk space.
+- When `java` is OpenJ9 (IBM Semeru), jar services get `-Xshareclasses` with one class cache in `.devfleet/j9cache` shared by all of them, plus `-Xtune:virtualized`, unless `java_opts` set their own. In a 9-service project this cut Java memory from 3.3 GB to 1.7 GB.
+- `devfleet up` warns when many jar services run without a heap limit for the machine's memory, since each JVM may otherwise grow to a quarter of it.
 
 ## [0.2.0] - 2026-11-20
 

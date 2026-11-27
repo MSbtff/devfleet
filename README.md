@@ -41,6 +41,7 @@ devfleet              │ gateway-server     ✔ ready  7070  5.1s   15296
 ## Features
 
 - **Project analysis with `init`**: finds Spring Boot apps (Gradle or Maven, single or multi-module) and fills in the port, Actuator health URL, and run command.
+  With `init --jar`, each app is built once and run with `java -jar` instead of `bootRun`, so no Gradle daemon stays busy per service.
   Placeholders such as `${PORT:7071}` in `application.yml` are resolved against `.env`.
   If there is a `compose.yaml`, service order and required infrastructure (DB, Redis, Kafka, …) are taken from `depends_on`.
 - **Spring Cloud awareness**: apps that use Config Server, Eureka, Consul, or Nacos are started after that server.
@@ -75,10 +76,10 @@ npm link            # makes the devfleet command available everywhere
 
 | Command | Description |
 |---|---|
-| `devfleet init` | Analyze the current folder and create `devfleet.yaml` (`--print`: print instead of writing, `--force`: overwrite) |
+| `devfleet init` | Analyze the current folder and create `devfleet.yaml` (`--print`: print instead of writing, `--force`: overwrite, `--jar`: [jar mode](#jar-mode)) |
 | `devfleet up [name...]` | Start services or groups together with their dependencies. Starts everything when no name is given |
 | `devfleet status` | Port and health status of each service, plus the process holding the port. While `devfleet up` is running, a FLEET column shows what it knows (starting, crashed, stopped, …) |
-| `devfleet restart <name...>` | Restart services or groups inside the running `devfleet up`, from another terminal |
+| `devfleet restart <name...>` | Restart services or groups inside the running `devfleet up`, from another terminal. Services with a `build` are rebuilt first (`--no-build` skips it) |
 | `devfleet stop <name...>` | Stop services or groups inside the running `devfleet up`; `devfleet restart` brings them back |
 | `devfleet logs <name> [-f]` | Show a service's log file |
 | `devfleet down` | Stop the running `devfleet up` (if any) and the infra containers (data volumes are kept) |
@@ -90,6 +91,7 @@ Options for `up`
 | `--no-deps` | Don't start dependencies; only check that they are already running |
 | `--no-infra` | Leave Docker Compose infrastructure alone |
 | `--down` | Stop the infra containers on exit as well |
+| `--no-build` | Skip the services' `build` commands and run what was built last time |
 | `--only a,b` | Show only these services' logs on screen (all logs are still written to files) |
 | `-q`, `--quiet` | Show only status messages on screen |
 | `--dry-run` | Print the start plan without running anything |
@@ -204,10 +206,49 @@ How it works:
 - Failures during the first start (exiting before becoming ready, or a health check timeout) are not retried: they usually mean a configuration problem.
 - `devfleet stop` or `devfleet restart` from another terminal cancels a pending automatic restart and takes over, so you can stop a service that keeps crashing. `devfleet status` shows how many times each service was restarted.
 
+### Jar mode
+
+`bootRun` keeps a Gradle daemon busy for as long as the app runs, so nine services mean nine daemons on top of nine apps (see the notes below).
+In jar mode devfleet builds each app once and runs the jar with `java -jar`:
+
+```bash
+devfleet init --jar     # generate build + jar instead of cmd: ./gradlew bootRun
+```
+
+```yaml
+java_opts: -XX:TieredStopAtLevel=1    # JVM options for every jar service, placed before -jar
+
+services:
+  account-service:
+    dir: AccountService
+    build: ./gradlew bootJar          # runs before the service starts
+    jar: build/libs/*.jar             # relative to dir; the newest match wins, *-plain.jar is skipped
+    java_opts: -Xmx512m               # optional, this service only; comes after the top-level ones and wins
+    port: 7071
+
+  menus-service:                      # a module of a multi-module build
+    dir: apps/menus                   # the app runs from its own folder
+    build:
+      cmd: ./gradlew :apps:menus:bootJar
+      dir: .                          # but is built from the root project
+    jar: build/libs/*.jar
+```
+
+- **One build at a time.** Builds start right away in dependency order, while infra and dependencies are still coming up, but only one runs at a time (`build_concurrency`, default 1). A service whose dependency fails has its build cancelled, and a service that is already running (in your IDE, say) is reused without building. Gradle then reuses one daemon for the builds (when the projects use the same Gradle version and JVM) instead of keeping one busy per service. Raise `build_concurrency` to build faster with more daemons.
+- **The build daemon is stopped when the builds are done.** An idle Gradle daemon stays in memory for three hours, so once no build is running or waiting, devfleet stops the daemons its builds used (about 0.6 GB each even for a small project). Builds get their own daemon registry under `.devfleet/gradle-daemons` through `GRADLE_OPTS`, so the daemons your IDE or a `bootRun` service uses are never shared with them and never stopped. The cost is a cold daemon on each `devfleet restart` build; set `gradle_daemon: keep` at the top level to keep the daemon instead. Checked with Gradle 7.6, 8.14, and 9.5; with a Gradle version that ignores the registry setting, builds use the usual daemons and devfleet stops none.
+- **`devfleet restart` rebuilds first.** Edit the code, run `devfleet restart account-service`, and devfleet builds the new jar while the old one keeps serving, then swaps them. If the build fails, the running process is left alone. `devfleet restart --no-build` restarts without building, and `devfleet up --no-build` starts from the jars built last time. Automatic restarts after a crash never rebuild.
+- **A copy runs, not the build output.** devfleet copies the jar to `.devfleet/jars/<service>.jar` and runs that, so a build can overwrite `build/libs` while the service is running. On APFS (macOS), btrfs, and XFS the copy is a copy-on-write clone that takes no extra disk space; elsewhere it is a plain copy.
+- **Java comes from `JAVA_HOME`** when it is set (in your shell, `env`, or `env_file`), otherwise from `PATH`.
+- `build` works without `jar` too: any service can run a build command before its `cmd`.
+- **Most of the memory left is the apps, so trim them with `java_opts`.** `bootRun` starts apps with `-XX:TieredStopAtLevel=1` (Spring Boot's optimized launch) and `java -jar` does not, so `init --jar` puts it in the top-level `java_opts`. Capping the heap saves far more: add `-Xmx256m -XX:+UseSerialGC` there if your apps fit in that heap, and raise it for the services that need more. Use `java_opts` rather than `JAVA_TOOL_OPTIONS` in `env`: builds get `env` too, and a 256 MB heap limit would reach the Gradle daemon. Without a cap, each JVM may grow its heap to a quarter of the machine's memory, so on a 16 GB laptop nine apps could take far more than it has; `devfleet up` warns when the uncapped jar services are many for the machine's memory.
+- **Measured in the 9-service project above** (Java memory one minute after everything was ready): `bootRun` used 7.1 GB, of which 4.5 GB were Gradle daemons and wrapper clients. Jar mode used 3.8 GB, 3.5 GB with `-XX:TieredStopAtLevel=1`, and 2.6 GB with `-Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1`. After shutdown, `bootRun` left two idle daemons (0.85 GB); jar mode left nothing.
+- **OpenJ9 halves the memory.** Point `JAVA_HOME` at an OpenJ9 JDK such as IBM Semeru (in `env`, for example) and nothing else changes: devfleet detects OpenJ9 from `java -version` and adds `-Xshareclasses:name=devfleet,cacheDir=.devfleet/j9cache,nonfatal` (one class cache, given as an absolute path, shared by every service) and `-Xtune:virtualized`. Your own `-Xshareclasses` or `-Xtune:` in `java_opts` replace them, and `-Xshareclasses:none` turns sharing off. HotSpot-only `-XX:` options are ignored by OpenJ9. In the same project the Java memory, counting shared pages once, went from 3.3 GB (HotSpot, `-XX:TieredStopAtLevel=1`) and 2.4 GB (HotSpot with a 256 MB heap cap) to 1.7 GB, with startup a few seconds slower. The cache takes about 64 MB on disk and can be deleted at any time; `nonfatal` lets the apps start without it if it can't be used. Peak throughput is lower than HotSpot's, which rarely matters locally.
+- If your build uses Kotlin, `kotlin.compiler.execution.strategy=in-process` in `gradle.properties` keeps the Kotlin compiler from starting a daemon of its own.
+
 ### Notes for Gradle `bootRun`
 
 - **The health timeout includes compile time.** On a cold start (no Gradle daemon, nothing compiled yet) every service starts its own daemon and compiles before the app boots. In the 9-service project above, the slowest service took about 20 seconds from a cold start, well within the 180-second default. Raise `health.timeout` for large modules.
-- **Each `bootRun` keeps a Gradle daemon busy.** A running `bootRun` occupies its daemon, so N services mean N daemons in addition to N application JVMs. In the same project this came to about 3.3 GB for the daemons and 3.1 GB for the apps and wrapper clients. If memory is tight, start only what you need (`devfleet up account-service`), or run the remaining services as Compose containers. Run `./gradlew --stop` afterwards to release the daemons.
+- **Each `bootRun` keeps a Gradle daemon busy.** A running `bootRun` occupies its daemon, so N services mean N daemons in addition to N application JVMs. In the same project this came to about 3.3 GB for the daemons and 3.1 GB for the apps and wrapper clients. If memory is tight, start only what you need (`devfleet up account-service`), or run the remaining services as Compose containers. Run `./gradlew --stop` afterwards to release the daemons, or use [jar mode](#jar-mode).
 
 ## Example
 
@@ -281,7 +322,7 @@ Rules are applied in array order, and a dependency that would create a cycle wit
 ## Roadmap
 
 - [ ] Detect Node, Python, and Go services (`package.json`, `pyproject.toml`, `go.mod`)
-- [ ] Jar mode: build once with `bootJar` and run `java -jar`, so Gradle daemons don't stay resident per service
+- [x] Jar mode: build once with `bootJar` and run `java -jar`, so Gradle daemons don't stay resident per service
 - [x] `devfleet restart <name>` to restart one running service from another terminal
 - [ ] Restart a service when its files change (`--watch`)
 - [ ] Hybrid mode: run most services as Compose containers and only the ones you are editing locally

@@ -29,6 +29,7 @@ export class Logger {
   private readonly files = new Map<string, fs.WriteStream>();
   private readonly tails = new Map<string, string[]>();
   private readonly listeners = new Set<(text: string) => void>();
+  private closed = false;
 
   constructor({ out = process.stdout, color, names = [], logDir = null, quiet = false, only = null }: LoggerOptions = {}) {
     this.out = out;
@@ -59,14 +60,14 @@ export class Logger {
     let stream = this.files.get(name);
     if (!stream) {
       stream = fs.createWriteStream(file, { flags: 'w' });
+      stream.on('error', () => {});
       this.files.set(name, stream);
     }
     return stream;
   }
 
-  /** One line of process output. Always written to the file; shown on screen depending on options. */
   line(name: string, text: string): void {
-    this.file(name)?.write(`${text}\n`);
+    if (!this.closed) this.file(name)?.write(`${text}\n`);
     const tail = this.tails.get(name) ?? [];
     tail.push(text);
     if (tail.length > TAIL_LINES) tail.shift();
@@ -83,7 +84,6 @@ export class Logger {
     readline.createInterface({ input: stream, crlfDelay: Infinity }).on('line', (text) => this.line(name, text));
   }
 
-  /** Shows the last log lines of a service whose output was hidden, after it fails. */
   dumpTail(name: string): void {
     if (this.isVisible(name)) return;
     const tail = this.tails.get(name) ?? [];
@@ -100,7 +100,6 @@ export class Logger {
     }
   }
 
-  /** Calls `listener` with every status message (without colors) until the returned function is called. */
   subscribe(listener: (text: string) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -127,6 +126,7 @@ export class Logger {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     await Promise.all([...this.files.values()].map((f) => new Promise<void>((resolve) => f.end(resolve))));
   }
 }

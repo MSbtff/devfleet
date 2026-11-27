@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { findConfig, loadConfig, CONFIG_NAMES } from './config.ts';
-import { startFleet, planUp, formatSummary, formatTable, displayPath, statusLabel, type Plan } from './runner.ts';
+import { startFleet, planUp, formatSummary, formatTable, displayPath, statusLabel, describeCommand, type Plan } from './runner.ts';
 import { controlPath, serveControl, sendControl, UnsafeControlDirError } from './control.ts';
 import { resolveTargets } from './graph.ts';
 import { composeArgs } from './infra.ts';
@@ -14,16 +14,17 @@ import { checkOnce, describeHealth } from './health.ts';
 import type { Config } from './types.ts';
 import { parseArgs, type Args } from './args.ts';
 
-// Both src/cli.ts and dist/cli.js have package.json one level up.
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 const HELP = `devfleet ${version} — start local microservices in dependency order
 
 Usage
-  devfleet init                  analyze the project and create a devfleet.yaml draft
+  devfleet init [--jar]          analyze the project and create a devfleet.yaml draft
+                                 (--jar: build jars and run them with java -jar instead of bootRun)
   devfleet up [name...]          start services (or groups) in dependency order
   devfleet status                show each service's port and health
-  devfleet restart <name...>     restart services in the running \`devfleet up\`
+  devfleet restart <name...>     rebuild and restart services in the running \`devfleet up\`
+                                 (--no-build: restart without rebuilding)
   devfleet stop <name...>        stop services in the running \`devfleet up\`
   devfleet logs <name> [-f]      show a service's log file
   devfleet down                  stop the running \`devfleet up\` and the infra containers
@@ -32,6 +33,7 @@ Options for up
   --no-deps        don't start dependencies; only check that they are running
   --no-infra       leave Docker Compose infrastructure alone
   --down           also stop the infra containers on exit
+  --no-build       skip the services' build commands and run what was built last time
   --only a,b       show only these services' logs on screen (files get everything)
   -q, --quiet      show only status messages on screen
   --dry-run        print the start plan without running anything
@@ -62,7 +64,7 @@ function requireConfig(opts: Args): Config {
 function cmdInit(opts: Args): void {
   const root = process.cwd();
   const target = path.join(root, CONFIG_NAMES[0]);
-  const project = detectProject(root);
+  const project = detectProject(root, { jar: Boolean(opts.jar) });
   const text = renderConfig(project);
   if (opts.print) {
     process.stdout.write(text);
@@ -93,7 +95,8 @@ function printPlan(config: Config, plan: Plan, opts: Args): void {
       const svc = config.services[name]!;
       const deps = svc.dependsOn.length ? ` ← ${svc.dependsOn.join(', ')}` : '';
       console.log(`  ${name}${deps}`);
-      console.log(`    ${svc.cmd}  @ ${rel(svc.dir)}`);
+      if (svc.build && opts.build !== false) console.log(`    build: ${svc.build.cmd}  @ ${rel(svc.build.dir)}`);
+      console.log(`    ${describeCommand(svc)}  @ ${rel(svc.dir)}`);
       console.log(`    ready when: ${describeHealth(svc.health)}`);
     }
   });
@@ -108,6 +111,7 @@ async function cmdUp(opts: Args): Promise<void> {
     stopInfra: Boolean(opts.down),
     quiet: Boolean(opts.quiet),
     only: only ? only.split(',').map((s) => s.trim()).filter(Boolean) : null,
+    build: opts.build !== false,
   };
   if (opts['dry-run']) {
     try {
@@ -143,7 +147,6 @@ async function cmdUp(opts: Args): Promise<void> {
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
 
-  // Lets `devfleet status`, `restart`, `stop`, and `down` in other terminals reach this run.
   const control = await serveControl(controlPath(config), async (request, reply) => {
     if (request.cmd === 'status') {
       return reply.done({ ok: true, pid: process.pid, rows: fleet.summarize() });
@@ -159,7 +162,10 @@ async function cmdUp(opts: Args): Promise<void> {
     }
     logger.system(`${request.cmd} requested from another terminal: ${request.names.join(', ')}`);
     const unsubscribe = logger.subscribe(reply.log);
-    const result = request.cmd === 'restart' ? await fleet.restart(request.names) : await fleet.stopServices(request.names);
+    const result =
+      request.cmd === 'restart'
+        ? await fleet.restart(request.names, { build: request.build !== false })
+        : await fleet.stopServices(request.names);
     unsubscribe();
     if (result.error) logger.system(`${request.cmd} failed: ${result.error}`);
     return reply.done({ ...result, pid: process.pid, rows: fleet.summarize() });
@@ -215,7 +221,6 @@ async function cmdStatus(opts: Args): Promise<void> {
     console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'PROCESS'], ...rows]));
     return;
   }
-  // FLEET is what the running `devfleet up` knows: starting, crashed, stopped on request, ….
   const withFleet = rows.map(([name = '', port = '', status = '', who = '']) => {
     const row = managed.get(name);
     const restarts = row?.restarts ? ` · restarted ${row.restarts}×` : '';
@@ -225,7 +230,6 @@ async function cmdStatus(opts: Args): Promise<void> {
   console.log(formatTable([['SERVICE', 'PORT', 'STATUS', 'FLEET', 'PROCESS'], ...withFleet]));
 }
 
-/** Sends `restart` or `stop` to the running `devfleet up` and prints its progress. */
 async function cmdControl(opts: Args, cmd: 'restart' | 'stop'): Promise<void> {
   const config = requireConfig(opts);
   if (!opts._.length) fail(`Name a service or group, e.g. devfleet ${cmd} account-service`);
@@ -235,7 +239,8 @@ async function cmdControl(opts: Args, cmd: 'restart' | 'stop'): Promise<void> {
   } catch (err) {
     fail((err as Error).message);
   }
-  const result = await sendControl(controlPath(config), { cmd, names }, (line) => console.log(line));
+  const request = cmd === 'restart' ? { cmd, names, build: opts.build !== false } : { cmd, names };
+  const result = await sendControl(controlPath(config), request, (line) => console.log(line));
   if (!result) fail('No devfleet up is running for this project. Start one with `devfleet up`.');
   if (result.rows) {
     const affected = result.rows.filter((r) => names.includes(r.name));

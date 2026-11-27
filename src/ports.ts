@@ -19,13 +19,11 @@ function tryConnect(port: number, host: string, timeoutMs: number): Promise<bool
   });
 }
 
-/** Checks whether the port accepts local connections (IPv4 and IPv6). */
 export async function isPortOpen(port: number, timeoutMs = 500): Promise<boolean> {
   if (await tryConnect(port, '127.0.0.1', timeoutMs)) return true;
   return tryConnect(port, '::1', timeoutMs);
 }
 
-/** Processes listening on the port. Empty when lsof is unavailable. */
 export function findListeners(port: number): Promise<Listener[]> {
   if (process.platform === 'win32') return Promise.resolve([]);
   return new Promise((resolve) => {
