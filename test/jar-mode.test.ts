@@ -425,3 +425,19 @@ test('stopDaemons: 로그보다 늦게 시작한 프로세스는 PID가 재사�
     other.kill('SIGKILL');
   }
 });
+
+test('heapWarning: 힙 제한 없는 jar 서비스가 메모리에 비해 많으면 경고한다', async () => {
+  const { heapWarning } = await import('../src/runner.ts');
+  const jar = (javaOpts = '', env: Record<string, string> = {}) => ({ jar: 'build/libs/*.jar', javaOpts, env });
+  const GB = 1024 ** 3;
+  const nine = Array.from({ length: 9 }, () => jar('-XX:TieredStopAtLevel=1'));
+  assert.match(
+    heapWarning(nine, {}, 16 * GB) ?? '',
+    /^9 jar services have no heap limit, so each may grow to 4 GB \(a quarter of this machine's 16 GB\)/,
+  );
+  assert.equal(heapWarning(nine, {}, 48 * GB), null, '48GB에서 9개는 괜찮다');
+  assert.equal(heapWarning(Array.from({ length: 9 }, () => jar('-Xmx256m')), {}, 16 * GB), null);
+  assert.equal(heapWarning(nine, { JAVA_TOOL_OPTIONS: '-XX:MaxRAMPercentage=5' }, 16 * GB), null, 'JAVA_TOOL_OPTIONS도 본다');
+  assert.equal(heapWarning([...Array.from({ length: 9 }, () => jar('', { JDK_JAVA_OPTIONS: '-Xmx1g' }))], {}, 16 * GB), null);
+  assert.equal(heapWarning(Array.from({ length: 9 }, () => ({ jar: null, javaOpts: '', env: {} })), {}, 16 * GB), null, 'bootRun 등 cmd 서비스는 셀 수 없다');
+});

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readEnvFile } from './config.ts';
@@ -231,6 +232,35 @@ function javaCommand(env: NodeJS.ProcessEnv, javaOpts: string, jar: string): str
   return [shellQuote(java), javaOpts.trim(), '-jar', shellQuote(jar)].filter(Boolean).join(' ');
 }
 
+const HEAP_LIMIT = /(?:^|\s)(?:-Xmx\S|-XX:MaxHeapSize=|-XX:MaxRAM=|-XX:MaxRAMPercentage=)/;
+const GB = 1024 ** 3;
+
+/**
+ * Warns when jar services run without a heap limit and together could plausibly outgrow this machine.
+ * Without one, the JVM lets each app's heap grow to a quarter of physical memory. Apps idle at a few
+ * hundred MB but grow under load and hand little back, so this assumes about 1 GB each in real use
+ * and warns when that passes half of the memory.
+ */
+export function heapWarning(
+  services: readonly Pick<Config['services'][string], 'jar' | 'javaOpts' | 'env'>[],
+  env: NodeJS.ProcessEnv,
+  totalMemory: number = os.totalmem(),
+): string | null {
+  const inherited = `${env.JAVA_TOOL_OPTIONS ?? ''} ${env.JDK_JAVA_OPTIONS ?? ''}`;
+  const uncapped = services.filter(
+    (svc) =>
+      svc.jar &&
+      ![svc.javaOpts, inherited, svc.env.JAVA_TOOL_OPTIONS ?? '', svc.env.JDK_JAVA_OPTIONS ?? ''].some((o) => HEAP_LIMIT.test(o)),
+  );
+  if (uncapped.length * GB <= totalMemory / 2) return null;
+  const each = Number((totalMemory / 4 / GB).toFixed(1));
+  const total = Number((totalMemory / GB).toFixed(1));
+  return (
+    `${uncapped.length} jar services have no heap limit, so each may grow to ${each} GB (a quarter of this machine's ${total} GB). ` +
+    'If memory runs short, cap them in java_opts, e.g. -Xmx256m -XX:+UseSerialGC -XX:TieredStopAtLevel=1.'
+  );
+}
+
 /** The command a service runs, as shown in plans: the shell command, or java -jar for a jar. */
 export function describeCommand(svc: Pick<Config['services'][string], 'cmd' | 'jar' | 'javaOpts'>): string {
   return svc.jar ? ['java', svc.javaOpts.trim(), '-jar', svc.jar].filter(Boolean).join(' ') : svc.cmd;
@@ -255,6 +285,7 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     build: buildFirst = true,
   } = opts;
   const plan = planUp(config, names, { deps });
+  const service = (name: string) => config.services[name]!;
   const logger = new Logger({
     out,
     color,
@@ -264,6 +295,8 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
     only,
   });
   const baseEnv = { ...process.env, ...readEnvFile(config.envFile), ...config.env };
+  const heap = heapWarning(plan.targets.map(service), baseEnv);
+  if (heap) logger.system(`${logger.paint(33, '!')} ${heap}`);
   const state = new Map<string, ServiceState>();
   const promises = new Map<string, Promise<boolean>>();
   const abort = new AbortController();
@@ -294,7 +327,6 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
 
   const set = (name: string, patch: Partial<ServiceState>) =>
     state.set(name, { status: 'waiting', ...state.get(name), ...patch });
-  const service = (name: string) => config.services[name]!;
 
   async function startInfra(): Promise<boolean> {
     const infraConfig = config.infra;
@@ -409,10 +441,13 @@ export function startFleet(config: Config, names: readonly string[] = [], opts: 
         return false;
       }
       // Run a copy, so a later build can overwrite the original while this process keeps running.
+      // FICLONE makes it a copy-on-write clone that takes no extra disk space on APFS, btrfs, and XFS,
+      // and falls back to a plain copy elsewhere.
       const runJar = path.join(config.root, '.devfleet', 'jars', `${name}.jar`);
       try {
         fs.mkdirSync(path.dirname(runJar), { recursive: true });
-        fs.copyFileSync(jar, `${runJar}.tmp`);
+        fs.rmSync(`${runJar}.tmp`, { force: true });
+        fs.copyFileSync(jar, `${runJar}.tmp`, fs.constants.COPYFILE_FICLONE);
         fs.renameSync(`${runJar}.tmp`, runJar);
       } catch (err) {
         set(name, { status: 'failed' });
